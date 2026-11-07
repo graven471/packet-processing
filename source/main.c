@@ -1,6 +1,7 @@
-#include <sys/cdefs.h>
 #define _GNU_SOURCE
 
+#include <assert.h>
+#include <iso646.h>
 #include <pthread.h>
 #include <stdalign.h>
 #include <stdatomic.h>
@@ -10,31 +11,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/cdefs.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 
-#define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
+#define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((uintptr_t)(align) - 1))
 
 __attribute__((always_inline)) bool is_power_of_two(int n)
 {
 	return (n > 0) && ((n & (n - 1)) == 0);
 }
 
-alignas(64) struct CachedData {
-	_Atomic uintptr_t value;
-};
-
+// we want head and tail in different cache lines so producer and consumer
+// can modify head and tail without affecting each other cache line
 struct sz_ring {
-	// todo: align 64 to avoid false sharing
-	_Atomic uint32_t head;
-	_Atomic uint32_t tail;
-
+	_Alignas(64) _Atomic uint32_t head;
+	_Alignas(64) _Atomic uint32_t tail;
 	size_t capacity;
 	uint32_t mask;
 	void *data;
 };
 
-struct sz_ring *ring_init(size_t capacity)
+static __always_inline struct sz_ring *ring_init(size_t capacity)
 {
 	if (!is_power_of_two(capacity))
 		return NULL;
@@ -69,7 +67,7 @@ static void ring_free(struct sz_ring *ring)
 	free(ring);
 }
 
-inline bool is_empty(const struct sz_ring *ring)
+static inline bool is_empty(const struct sz_ring *ring)
 {
 	// consumer will call this so we need proper sync on tail
 	// and for head we can just use relaxed since producer is not gonna use this
@@ -81,7 +79,7 @@ inline bool is_empty(const struct sz_ring *ring)
 	return head == tail;
 }
 
-inline bool is_full(const struct sz_ring *ring)
+static inline bool is_full(const struct sz_ring *ring)
 {
 	// producer will use this before writing so we need proper sync on head
 	// this sync with consumer write with release
@@ -99,7 +97,7 @@ static void ring_commit_write(struct sz_ring *ring)
 	atomic_store_explicit(&ring->tail, tail + 1, memory_order_release);
 }
 
-static void ring_commit_read(struct sz_ring *ring)
+static inline void ring_commit_read(struct sz_ring *ring)
 {
 	uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
 	atomic_store_explicit(&ring->head, head + 1, memory_order_release);
@@ -107,13 +105,13 @@ static void ring_commit_read(struct sz_ring *ring)
 
 // producer will use this to write, consumer will not use this
 // so we can get away with relaxed
-static uint32_t write_index(const struct sz_ring *ring)
+static inline uint32_t write_index(const struct sz_ring *ring)
 {
 	uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
 	return ring->mask & tail;
 }
 
-static uint32_t read_index(const struct sz_ring *ring)
+static inline uint32_t read_index(const struct sz_ring *ring)
 {
 	uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
 	return ring->mask & head;
@@ -243,9 +241,28 @@ struct list_head {
 // assume (char *)(ptr) = 0x1010
 // then we do, (char*)0x1010 - 16 = 0x1000
 // container address = member address - member offset
-#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define typeof_member(T, m) typeof(((T *)0)->m)
+
+#define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
+
+#define container_of(ptr, type, member)                                                                      \
+	({                                                                                                   \
+		static_assert(__same_type(*(ptr), typeof_member(type, member)) || __same_type(*(ptr), void), \
+			      "pointer type mismatch in container_of()");                                    \
+		(type *)((void *)(ptr) - offsetof(type, member));                                            \
+	})
+
 #define list_entry(ptr, type, member) container_of(ptr, type, member)
+
 #define list_for_each(pos, head) for (pos = (head)->next; pos != (head); pos = pos->next)
+
+#define list_for_each_entry(pos, head, member)                                             \
+	for (pos = list_entry((head)->next, typeof(*pos), member); &pos->member != (head); \
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+
+#define list_for_each_entry_reverse(pos, head, member)                                     \
+	for (pos = list_entry((head)->prev, typeof(*pos), member); &pos->member != (head); \
+	     pos = list_entry(pos->member.prev, typeof(*pos), member))
 
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {
@@ -333,6 +350,101 @@ struct process {
 	struct list_head node; // offset = 16
 };
 
+#define NEXT_POW2(x) (1UL << (64 - __builtin_clzl((x) - 1)))
+#define PAGE_SIZE 4096
+
+typedef enum { Free, Partial, Full } slab_state_t;
+
+struct slab {
+	uint32_t slots;
+	uint32_t free_count;
+	slab_state_t state;
+	struct sz_arena *arena;
+	struct sz_free_list free_list;
+	struct list_head node;
+};
+
+// (todo): maybe change the name ? or i can use kernel name :)
+struct kmem_cache {
+	struct list_head slabs;
+	uint32_t object_size;
+	const char *name;
+};
+
+static inline struct kmem_cache *kmem_cache_create(const char *name, uint32_t object_size)
+{
+	object_size = NEXT_POW2(object_size);
+	printf("obj size: %d\n", object_size);
+
+	struct sz_arena *arena = arena_init(PAGE_SIZE, false, true);
+	if (!arena)
+		return NULL;
+
+	// we want initial n bytes of page to store slab metadata so skip it and align
+	uintptr_t offset = ((uintptr_t)arena->ptr) + sizeof(struct slab);
+	uintptr_t start = ALIGN_UP(offset, object_size);
+
+	printf("start = %lxlu\n", start);
+
+	uint32_t slots = ((uintptr_t)arena->ptr + PAGE_SIZE - start) >> __builtin_ctz(object_size);
+	assert(slots > 0 && "slots can not be zero");
+
+	printf("base address = %lxlu\n", (uintptr_t)arena->ptr);
+	printf("slots = %d\n", slots);
+
+	struct slab *slab = arena->ptr;
+	// since arena_init allocates `arena` on heap we can store it inside slab
+	slab->arena = arena;
+	slab->slots = slots;
+	slab->free_count = slots;
+	slab->state = Free;
+
+	// we want FIFO order not LIFO
+	for (uint32_t i = slots; i > 0; --i) {
+		uintptr_t addr = (uintptr_t)start + (i - 1) * object_size;
+		free_list_push((struct sz_free_list *)addr, &slab->free_list);
+	}
+
+	// debugging
+	// struct sz_free_list *curr;
+	// for (curr = slab->free_list.next; curr != NULL; curr = curr->next) {
+	// 	printf("free_list %lxp\n", (uintptr_t)curr);
+	// }
+
+	struct kmem_cache *cache = malloc(sizeof(struct kmem_cache));
+	if (!cache)
+		return NULL;
+
+	cache->name = name;
+	cache->object_size = object_size;
+	INIT_LIST_HEAD(&cache->slabs);
+
+	// build the initial link
+	list_add(&slab->node, &cache->slabs);
+
+	return cache;
+}
+
+static inline void *kmem_cache_alloc(struct kmem_cache *cache)
+{
+	struct slab *slab;
+	// todo: refill slab and do state managment
+	list_for_each_entry (slab, &cache->slabs, node) {
+		printf("%lxlu, slots = %d, free_count = %d\n", (uintptr_t)&slab->free_list, slab->slots,
+		       slab->free_count);
+
+		if (slab->state != Free)
+			continue;
+
+		struct sz_free_list *block = free_list_pop(&slab->free_list);
+		slab->free_count -= 1;
+		printf("%lxlu, slots = %d, free_count = %d\n", (uintptr_t)&slab->free_list, slab->slots,
+		       slab->free_count);
+		return (void *)block;
+	}
+	return NULL;
+}
+
 int main()
 {
 	struct sz_ring *ring = ring_init(32);
@@ -364,29 +476,51 @@ int main()
 
 	arena_destroy(arena);
 
-	struct list_head process_head;
-	INIT_LIST_HEAD(&process_head);
-
-	size_t offset = offsetof(struct process, node);
-	printf("node offset in process = %lu\n", offset);
+	// test
+	LIST_HEAD(process_head);
 
 	struct process a = { .pid = 10, .name = "xwayland" };
 	struct process b = { .pid = 20, .name = "swaybg" };
 
-	list_add(&a.node, &process_head);
-	list_add_tail(&b.node, &process_head);
+	list_add_tail(&a.node, &process_head);
+	list_add(&b.node, &process_head);
 
-	struct list_head *pos;
+	struct process *pos;
 
-	list_for_each (pos, &process_head) {
-		// ptr = node, type = process, member = node
-		// ((type *)((char *)(ptr) - offsetof(type, member)))
-		// auto x = (char*)(node) - offsetof(process, node)
-		// auto x = (char*)(node VA) - P
-		// process* = (type*) x
-		struct process *p = list_entry(pos, struct process, node);
-		printf("id = %d, name = %s\n", p->pid, p->name);
+	// list_for_each (pos, &process_head) {
+	// 	// ptr = node, type = process, member = node
+	// 	// ((type *)((char *)(ptr) - offsetof(type, member)))
+	// 	// auto x = (char*)(node) - offsetof(process, node)
+	// 	// auto x = (char*)(node VA) - P
+	// 	// process* = (type*) x
+	// 	struct process *p = list_entry(pos, struct process, node);
+	// 	printf("id = %d, name = %s\n", p->pid, p->name);
+	// }
+
+	list_for_each_entry (pos, &process_head, node) {
+		printf("PID: %d, Name: %s\n", pos->pid, pos->name);
 	}
+
+	struct kmem_cache *cache = kmem_cache_create("itch_order", sizeof(itch_add_order_t));
+	if (!cache) {
+		fprintf(stderr, "failed to create cache");
+		return -1;
+	}
+
+	itch_add_order_t *order = kmem_cache_alloc(cache);
+
+	if (!order) {
+		fprintf(stderr, "kmem alloc failed");
+		return -1;
+	}
+
+	printf("addr = %lxlu\n", (uintptr_t)order);
+
+	*order = (itch_add_order_t){
+		.length = 20, .msg_type = 10, .side = 'B', .shares = 30, .symbol = 0, .timestamp = 123424
+	};
+
+	printf("%d, %d, %c \n", order->length, order->msg_type, order->side);
 
 	return 0;
 }
