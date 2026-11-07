@@ -1,3 +1,4 @@
+#include <sys/cdefs.h>
 #define _GNU_SOURCE
 
 #include <pthread.h>
@@ -135,7 +136,7 @@ struct sz_arena {
 	uintptr_t bump;
 };
 
-static struct sz_arena *arena_init(size_t capacity, bool huge_pages, bool pre_fault)
+static inline struct sz_arena *arena_init(size_t capacity, bool huge_pages, bool pre_fault)
 {
 	if (!is_power_of_two(capacity)) {
 		fprintf(stderr, "requested size must needs to be power of two");
@@ -219,7 +220,7 @@ static struct sz_free_list *free_list_pop(struct sz_free_list *head)
 	return node;
 }
 
-static bool free_list_is_empty(const struct sz_free_list *head)
+static inline bool free_list_is_empty(const struct sz_free_list *head)
 {
 	return head->next == NULL;
 }
@@ -229,13 +230,35 @@ struct list_head {
 	struct list_head *next;
 };
 
-void list_init(struct list_head *head)
+#define LIST_HEAD_INIT(name) { &(name), &(name) }
+#define LIST_HEAD(name) struct list_head name = LIST_HEAD_INIT(name)
+
+// assume we have a struct called process its at vm address 0x1000
+// its layout is:
+// 0x1000 = name
+// 0x1008 = pid
+// 0x100C = padding
+// 0x1010 = node
+// assume offsetof(type, member) = 16
+// assume (char *)(ptr) = 0x1010
+// then we do, (char*)0x1010 - 16 = 0x1000
+// container address = member address - member offset
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define list_entry(ptr, type, member) container_of(ptr, type, member)
+#define list_for_each(pos, head) for (pos = (head)->next; pos != (head); pos = pos->next)
+
+static inline void INIT_LIST_HEAD(struct list_head *list)
 {
-	head->prev = head;
-	head->next = head;
+	list->next = list;
+	list->prev = list;
 }
 
-static inline void __list_add(struct list_head *new, struct list_head *prev, struct list_head *next)
+static __always_inline bool list_empty(const struct list_head *head)
+{
+	return head->next == head;
+}
+
+static __always_inline void __list_add(struct list_head *new, struct list_head *prev, struct list_head *next)
 {
 	// i want to insert new b/w prev and next
 	// remember one thing: A.next = B <==> B.prev = A
@@ -253,6 +276,35 @@ static inline void __list_add(struct list_head *new, struct list_head *prev, str
 	new->next = next;
 	prev->next = new;
 	next->prev = new;
+}
+
+static __always_inline void list_add(struct list_head *new, struct list_head *head)
+{
+	// initially:
+	// head <--> [x] <--> [y] and y.next -> head, head.prev -> y
+	// we want:
+	// head <--> [new] <--> [x] <--> [y] and y.next -> head, head.prev -> y
+	// new.prev  = head <==> new.next = head.next
+	// head.next = new  <==> x.prev   = new
+	__list_add(new, head, head->next);
+}
+
+static __always_inline void list_add_tail(struct list_head *new, struct list_head *head)
+{
+	// initially:
+	// head <--> [x] <--> [y] and y.next -> head, head.prev -> y
+	// we want:
+	// head <--> [x] <--> [y] <--> [new] and new.next -> head, head.prev -> next
+	// so,
+	// new.next  =  head <==> new.prev         = head.prev
+	// head.prev = new   <==> head.prev.next   = new
+	__list_add(new, head->prev, head);
+}
+
+static __always_inline void list_add_del(struct list_head *entry)
+{
+	entry->prev->next = entry->next;
+	entry->next->prev = entry->prev;
 }
 
 typedef struct {
@@ -274,6 +326,12 @@ typedef struct {
 // validate a packet, do stuffs add to ring buffer, io_uring fetches it writes
 // to disk etc
 // NIC → DPDK rx thread → parse → ring → io_uring thread → disk
+
+struct process {
+	const char *name; // offset = 0, size = 8
+	uint32_t pid; // offset = 8, size = 4,  4 padding
+	struct list_head node; // offset = 16
+};
 
 int main()
 {
@@ -305,6 +363,30 @@ int main()
 	}
 
 	arena_destroy(arena);
+
+	struct list_head process_head;
+	INIT_LIST_HEAD(&process_head);
+
+	size_t offset = offsetof(struct process, node);
+	printf("node offset in process = %lu\n", offset);
+
+	struct process a = { .pid = 10, .name = "xwayland" };
+	struct process b = { .pid = 20, .name = "swaybg" };
+
+	list_add(&a.node, &process_head);
+	list_add_tail(&b.node, &process_head);
+
+	struct list_head *pos;
+
+	list_for_each (pos, &process_head) {
+		// ptr = node, type = process, member = node
+		// ((type *)((char *)(ptr) - offsetof(type, member)))
+		// auto x = (char*)(node) - offsetof(process, node)
+		// auto x = (char*)(node VA) - P
+		// process* = (type*) x
+		struct process *p = list_entry(pos, struct process, node);
+		printf("id = %d, name = %s\n", p->pid, p->name);
+	}
 
 	return 0;
 }
