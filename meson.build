@@ -34,6 +34,7 @@ threads = dependency('threads')
 # Sources.
 sources = files(
   'source/allocator/slab.c',
+  'source/dpdk/dpdk.c',
   'source/main.c',
   'source/sz/arena.c',
   'source/sz/freelist.c',
