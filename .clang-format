@@ -11,32 +11,24 @@
 ---
 AccessModifierOffset: -4
 AlignAfterOpenBracket: Align
-# Prevents clang-format from breaking long comments into multiple lines (or merging them)
 ReflowComments: Never
 
-# Leaves trailing comment alignment entirely up to you (Requires Clang-Format 16+)
 AlignTrailingComments:
   Kind: Leave
 AlignConsecutiveAssignments: None
 AlignConsecutiveDeclarations: None
 AlignEscapedNewlines: Left
 AlignOperands: Align
-AlignTrailingComments: false
 AllowAllParametersOfDeclarationOnNextLine: false
-AllowShortBlocksOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
-AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
 AlwaysBreakAfterDefinitionReturnType: None
 AlwaysBreakAfterReturnType: None
 AlwaysBreakBeforeMultilineStrings: false
-AlwaysBreakTemplateDeclarations: false
 BinPackArguments: true
-BinPackParameters: true
 BraceWrapping:
   AfterClass: false
-  AfterControlStatement: false
   AfterEnum: false
   AfterFunction: true
   AfterNamespace: true
@@ -791,9 +783,6 @@ PenaltyExcessCharacter: 100
 PenaltyReturnTypeOnItsOwnLine: 60
 
 PointerAlignment: Right
-# ReflowComments: false
-# SortIncludes: false
-# SortUsingDeclarations: false
 SpaceAfterCStyleCast: false
 SpaceAfterTemplateKeyword: true
 SpaceBeforeAssignmentOperators: true

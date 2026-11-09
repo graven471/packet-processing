@@ -8,8 +8,8 @@
 struct sz_ring {
 	_Alignas(64) _Atomic uint32_t head;
 	_Alignas(64) _Atomic uint32_t tail;
-	size_t capacity;
-	uint32_t mask;
+	size_t capacity; /* power of two */
+	uint32_t mask; /* capacity - 1 */
 	void *data;
 };
 
