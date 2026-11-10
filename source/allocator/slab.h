@@ -30,8 +30,7 @@ struct kmem_cache {
 [[nodiscard, gnu::hot, gnu::always_inline, gnu::returns_nonnull]] void *
 kmem_cache_alloc(struct kmem_cache *_Nonnull cache);
 
-// (todo): build this
-bool kmem_cache_alloc_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **p);
+[[nodiscard, gnu::hot]] bool kmem_cache_alloc_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **p);
 void kmem_cache_free_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **_Nonnull p);
 
 void kmem_cache_free(struct kmem_cache *_Nonnull cache, void *_Nonnull obj);

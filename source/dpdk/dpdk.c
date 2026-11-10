@@ -1,5 +1,6 @@
 #include "dpdk.h"
 #include <rte_common.h>
+#include <rte_config.h>
 #include <rte_debug.h>
 #include <rte_dev.h>
 #include <rte_eal.h>
@@ -9,13 +10,18 @@
 #include <rte_lcore.h>
 #include <rte_lcore_var.h>
 #include <rte_log.h>
+#include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_mbuf_core.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
 #include <rte_per_lcore.h>
+#include <rte_ring.h>
+#include <rte_ring_core.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 
 /*
  * core components of DPDK
@@ -39,7 +45,8 @@ static inline void init_eal()
 		"0-10", // lcores 0 to 10
 		"-n",
 		"4", // memory channels
-	   // "--no-huge", // for dev/testing without hugepages
+		// "--no-huge", // for dev/testing without hugepages
+		"--log-color",
 	};
 	int argc = sizeof(argv) / sizeof(argv[0]);
 
@@ -215,7 +222,34 @@ static inline void mbuf_lib(void)
 	rte_pktmbuf_free(mb);
 }
 
-static inline void ethernet_device_lib(void)
+typedef enum : uint64_t {
+	TX_OFFLOAD_VLAN_INSERT = 1ULL << 0,
+	TX_OFFLOAD_IPV4_CKSUM = 1ULL << 1,
+	TX_OFFLOAD_UDP_CKSUM = 1ULL << 2,
+	TX_OFFLOAD_TCP_CKSUM = 1ULL << 3,
+	TX_OFFLOAD_TCP_TSO = 1ULL << 5,
+	TX_OFFLOAD_UDP_TSO = 1ULL << 6,
+} tx_offload_flags;
+
+typedef enum : uint64_t {
+	RX_OFFLOAD_VLAN_STRIP = 1ULL << 0,
+	RX_OFFLOAD_IPV4_CKSUM = 1ULL << 1,
+	RX_OFFLOAD_UDP_CKSUM = 1ULL << 2,
+	RX_OFFLOAD_TCP_CKSUM = 1ULL << 3,
+	RX_OFFLOAD_SCATTER = 1ULL << 13,
+} rx_offload_flags;
+
+struct dpdk_port_config {
+	uint16_t port_id;
+	uint16_t nb_rx_queues;
+	uint16_t nb_tx_queues;
+	uint16_t nb_rx_descriptors;
+	uint16_t nb_tx_descriptors;
+	tx_offload_flags tx_flags;
+	rx_offload_flags rx_flags;
+};
+
+static inline void init_port(struct dpdk_port_config *_Nonnull config)
 {
 	/*
      * core idea:
@@ -243,53 +277,108 @@ static inline void ethernet_device_lib(void)
       * and others to process them. The application exchanges packets between cores via rings.
 	 */
 
+	int retval;
 	struct rte_eth_dev_info dev_info = { 0 };
+	struct rte_eth_conf port_conf = { 0 };
 
-	int ret = rte_eth_dev_info_get(0, &dev_info);
+	if (!rte_eth_dev_is_valid_port(config->port_id)) {
+		rte_exit(EXIT_FAILURE, "port %d is not valid configure the device for DPDK first\n", config->port_id);
+	}
 
-	if (ret < 0)
+	retval = rte_eth_dev_info_get(config->port_id, &dev_info);
+	if (retval != 0)
 		rte_exit(EXIT_FAILURE, "Cannot get device info\n");
 
-	printf("RX capabilities:\n");
+#define TX_OFFLOAD_SUPPORTED(flag, rte_flag) ((config->tx_flags & (flag)) && (dev_info.tx_offload_capa & (rte_flag)))
+#define RX_OFFLOAD_SUPPORTED(flag, rte_flag) ((config->rx_flags & (flag)) && (dev_info.rx_offload_capa & (rte_flag)))
 
-#define PRINT_RX(flag)                         \
-	if (dev_info.rx_offload_capa & (flag)) \
-	printf("  %s\n", #flag)
+	// this is kinda reminding me of VkPhysicalDeviceFeatures :)
+	if (TX_OFFLOAD_SUPPORTED(TX_OFFLOAD_VLAN_INSERT, RTE_ETH_TX_OFFLOAD_VLAN_INSERT)) {
+		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+		RTE_LOG(INFO, USER1, "Enabling TX_OFFLOAD_VLAN_INSERT feature\n");
+	}
 
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_VLAN_STRIP);
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_IPV4_CKSUM);
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_UDP_CKSUM);
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_TCP_CKSUM);
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_SCATTER);
-	PRINT_RX(RTE_ETH_RX_OFFLOAD_RSS_HASH);
+	if (TX_OFFLOAD_SUPPORTED(TX_OFFLOAD_UDP_TSO, RTE_ETH_TX_OFFLOAD_UDP_TSO)) {
+		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_UDP_TSO;
+		RTE_LOG(INFO, USER1, "Enabling TX_OFFLOAD_UDP_TSO feature\n");
+	}
 
-	printf("TX capabilities:\n");
+	if (TX_OFFLOAD_SUPPORTED(TX_OFFLOAD_IPV4_CKSUM, RTE_ETH_TX_OFFLOAD_IPV4_CKSUM)) {
+		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling TX_OFFLOAD_IPV4_CKSUM feature\n");
+	}
 
-#define PRINT_TX(flag)                         \
-	if (dev_info.tx_offload_capa & (flag)) \
-	printf("  %s\n", #flag)
+	if (TX_OFFLOAD_SUPPORTED(TX_OFFLOAD_UDP_CKSUM, RTE_ETH_TX_OFFLOAD_UDP_CKSUM)) {
+		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_UDP_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling TX_OFFLOAD_UDP_CKSUM feature\n");
+	}
 
-	PRINT_TX(RTE_ETH_TX_OFFLOAD_VLAN_INSERT);
-	PRINT_TX(RTE_ETH_TX_OFFLOAD_IPV4_CKSUM);
-	PRINT_TX(RTE_ETH_TX_OFFLOAD_UDP_CKSUM);
-	PRINT_TX(RTE_ETH_TX_OFFLOAD_TCP_CKSUM);
-	PRINT_TX(RTE_ETH_TX_OFFLOAD_MULTI_SEGS);
+	if (TX_OFFLOAD_SUPPORTED(TX_OFFLOAD_TCP_CKSUM, RTE_ETH_TX_OFFLOAD_TCP_CKSUM)) {
+		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling TX_OFFLOAD_TCP_CKSUM feature\n");
+	}
 
-	struct rte_eth_rxmode rxmode = { .mtu = 1500, .offloads = 0 };
+	if (RX_OFFLOAD_SUPPORTED(RX_OFFLOAD_IPV4_CKSUM, RTE_ETH_RX_OFFLOAD_IPV4_CKSUM)) {
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling RX_OFFLOAD_IPV4_CKSUM feature\n");
+	}
 
-	struct rte_eth_conf conf = {
-		.link_speeds = RTE_ETH_LINK_SPEED_100M,
-		.lpbk_mode = 0,
-		.rxmode = rxmode,
-		.txmode = { .offloads = 0 },
+	if (RX_OFFLOAD_SUPPORTED(RX_OFFLOAD_TCP_CKSUM, RTE_ETH_RX_OFFLOAD_TCP_CKSUM)) {
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling RX_OFFLOAD_TCP_CKSUM feature\n");
+	}
+
+	if (RX_OFFLOAD_SUPPORTED(RX_OFFLOAD_UDP_CKSUM, RTE_ETH_RX_OFFLOAD_UDP_CKSUM)) {
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_UDP_CKSUM;
+		RTE_LOG(INFO, USER1, "Enabling RX_OFFLOAD_UDP_CKSUM feature\n");
+	}
+
+	if (RX_OFFLOAD_SUPPORTED(RX_OFFLOAD_VLAN_STRIP, RTE_ETH_RX_OFFLOAD_VLAN_STRIP)) {
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
+		RTE_LOG(INFO, USER1, "Enabling RX_OFFLOAD_VLAN_STRIP feature\n");
+	}
+
+	if (config->nb_rx_queues > dev_info.max_rx_queues) {
+		RTE_LOG(WARNING, USER1, "Requested RX queues (%u) exceeds maximum (%u). Clamping.\n",
+			config->nb_rx_queues, dev_info.max_rx_queues);
+		config->nb_rx_queues = dev_info.max_rx_queues;
+	}
+
+	if (config->nb_tx_queues > dev_info.max_tx_queues) {
+		RTE_LOG(WARNING, USER1, "Requested TX queues (%u) exceeds maximum (%u). Clamping.\n",
+			config->nb_tx_queues, dev_info.max_tx_queues);
+		config->nb_tx_queues = dev_info.max_tx_queues;
+	}
+
+	port_conf.link_speeds = RTE_ETH_LINK_SPEED_AUTONEG;
+	port_conf.lpbk_mode = 0;
+
+	retval = rte_eth_dev_configure(config->port_id, config->nb_rx_queues, config->nb_tx_queues, &port_conf);
+	if (retval < 0)
+		rte_exit(EXIT_FAILURE, "Cannot configure port: %s\n", rte_strerror(-retval));
+
+	// this already clamps and align descriptors we don't need to do anything
+	retval = rte_eth_dev_adjust_nb_rx_tx_desc(config->port_id, &config->nb_rx_descriptors,
+						  &config->nb_tx_descriptors);
+	if (retval != 0)
+		rte_exit(EXIT_FAILURE, "failed to adjust rx and tx descriptors error: %s\n", rte_strerror(-retval));
+
+	for (uint16_t q = 0; q < config->nb_tx_queues; ++q) {
+		retval = rte_eth_tx_queue_setup(config->port_id, q, config->nb_tx_descriptors,
+						(unsigned int)rte_eth_dev_socket_id(config->port_id), nullptr);
+		if (retval != 0)
+			rte_exit(EXIT_FAILURE, "failed to setup tx queue error: %s\n", rte_strerror(-retval));
+	}
+
+	for (uint16_t q = 0; q < config->nb_rx_queues; ++q) {
+		// (todo): should we create mbuf_pool here or take it in arg ?
+		// we must pass mb_pool otherwise we will get error
+		retval = rte_eth_rx_queue_setup(config->port_id, q, config->nb_rx_descriptors,
+						(unsigned int)rte_eth_dev_socket_id(config->port_id), nullptr, nullptr);
 	};
 
-	ret = rte_eth_dev_configure(0, 1, 1, &conf);
-
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Cannot configure port: %s\n", rte_strerror(-ret));
-
-	RTE_LOG(INFO, USER1, "dev_configure success\n");
+	printf("driver name = %s\n", dev_info.driver_name);
+	RTE_LOG(INFO, USER1, "port init success\n");
 }
 
 [[clang::unavailable("notes")]] static inline void ixgbe_datasheet_notes(void)
@@ -305,7 +394,7 @@ static inline void ethernet_device_lib(void)
      * Section 1.9 Architecture and basic operation
      * 1.9.1 Transmit (Tx) Data Flow
      * def: Tx data flow provides a high-level description of all data/control transformations
-     *      steps needed for sending Ethernet packets over write
+     *      steps needed for sending Ethernet packets over wire
      *
      * "host" means our Computer
      *
@@ -433,6 +522,40 @@ static inline void ethernet_device_lib(void)
      */
 }
 
+static inline void ring_api(void)
+{
+	// create's a SPSC ring similar to my ring the size must need to be power of two unless RING_F_EXACT_SZ flag is specified
+	struct rte_ring *ring = rte_ring_create("test", 32, (int)rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+
+	if (ring == nullptr) {
+		rte_exit(EXIT_FAILURE, "failed to create ring error: %s\n", rte_strerror(rte_errno));
+	}
+
+	// note we can also use burst or bulk enqueue and dequeue
+	for (size_t i = 0; i < 32; ++i) {
+		const struct foo foo = { .id = (uint32_t)i + 2 * 32, .name = "spsc ring" };
+		rte_ring_enqueue(ring, (void *)&foo);
+	}
+
+	// for (size_t i = 0; i < 32; ++i) {
+	// 	struct foo *foo;
+	// 	rte_ring_dequeue(ring, (void **)&foo);
+	// 	printf("id = %d \t name = %s \n", foo->id, foo->name);
+	// }
+
+	struct foo *foo = rte_zmalloc(nullptr, 128, 0);
+
+	if (foo == nullptr) {
+		rte_exit(EXIT_FAILURE, "zmalloc failed %s\n", rte_strerror(rte_errno));
+	}
+
+	foo->id = 20;
+	foo->name = "test";
+
+	rte_free(foo);
+	rte_ring_free(ring);
+}
+
 // roadmap = rte_mempool → rte_mbuf → rte_ethdev (rx)
 void learn()
 {
@@ -445,7 +568,16 @@ void learn()
 	mem_pool_lib();
 	mbuf_lib();
 
-	ethernet_device_lib();
+	ring_api();
+
+	struct dpdk_port_config config = { .tx_flags = TX_OFFLOAD_IPV4_CKSUM | TX_OFFLOAD_TCP_CKSUM |
+						       TX_OFFLOAD_UDP_CKSUM,
+					   .rx_flags = RX_OFFLOAD_VLAN_STRIP,
+					   .nb_rx_queues = 32,
+					   .nb_tx_queues = 32,
+					   .nb_rx_descriptors = 128,
+					   .nb_tx_descriptors = 128 };
+	init_port(&config);
 
 	// (todo): find out why i am getting seg fault when calling this
 	// rte_eal_cleanup();
