@@ -143,38 +143,6 @@ int main(int argc, char **argv)
 
 	// ================== testing DPDK ==================
 	learn();
-	// 	int ret;
-	// 	unsigned lcore_id;
-	//
-	// 	ret = rte_eal_init(argc, argv);
-	// 	if (ret < 0)
-	// 		rte_panic("Cannot init EAL\n");
-	// 	/* >8 End of initialization of Environment Abstraction Layer */
-	//
-	// 	/* Launches the function on each lcore. 8< */
-	// 	RTE_LCORE_FOREACH_WORKER(lcore_id)
-	// 	{
-	// 		rte_eal_remote_launch(lcore_hello, NULL, lcore_id);
-	// 	}
-	//
-	// 	/* call it on main lcore too */
-	// 	lcore_hello(NULL);
-	// 	/* >8 End of launching the function on each lcore. */
-	//
-	// 	rte_eal_mp_wait_lcore();
-	//
-	// 	struct rte_mempool *mp = rte_pktmbuf_pool_create("mbuf_pool", // name
-	// 							 8192, // number of mbufs
-	// 							 256, // cache size per lcore
-	// 							 0, // private data size
-	// 							 RTE_MBUF_DEFAULT_BUF_SIZE,
-	// 							 rte_socket_id() // NUMA socket
-	// 	);
-	//
-	// 	printf("cache size = %d\n", mp->cache_size);
-	//
-	// 	/* clean up the EAL */
-	// 	rte_eal_cleanup();
 
 	return 0;
 }

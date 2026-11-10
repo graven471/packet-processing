@@ -1,4 +1,6 @@
 #include "dpdk.h"
+#include <asm-generic/errno-base.h>
+#include <errno.h>
 #include <rte_common.h>
 #include <rte_config.h>
 #include <rte_debug.h>
@@ -37,27 +39,6 @@
  * 7. rte_debug : Provides debug helpers
  */
 
-static inline void init_eal()
-{
-	char *argv[] = {
-		"packet-processor",
-		"-l",
-		"0-10", // lcores 0 to 10
-		"-n",
-		"4", // memory channels
-		// "--no-huge", // for dev/testing without hugepages
-		"--log-color",
-	};
-	int argc = sizeof(argv) / sizeof(argv[0]);
-
-	int ret;
-	ret = rte_eal_init(argc, argv);
-	if (ret < 0)
-		rte_panic("Cannot init EAL\n");
-
-	RTE_LOG(INFO, USER1, "EAL initialization success\n");
-}
-
 struct lcore_state {
 	int a;
 	int b;
@@ -86,6 +67,19 @@ struct foo {
 	const char *name;
 	uint32_t id;
 };
+
+static inline int init_eal(int argc, char **argv)
+{
+	int retval = rte_eal_init(argc, argv);
+
+	if (retval == EAGAIN)
+		retval = rte_eal_init(argc, argv);
+
+	if (retval < -1)
+		return -retval;
+
+	return 0;
+}
 
 // =============== chapter 2 Memory pool libraries ============
 static inline void mem_pool_lib()
@@ -247,9 +241,11 @@ struct dpdk_port_config {
 	uint16_t nb_tx_descriptors;
 	tx_offload_flags tx_flags;
 	rx_offload_flags rx_flags;
+	struct rte_mempool *_Nonnull rx_mempool; /* (todo): investigate can we have better design */
 };
 
-static inline void init_port(struct dpdk_port_config *_Nonnull config)
+// eal must needs to be initialized before calling this function
+static inline int configure_port(struct dpdk_port_config *_Nonnull config)
 {
 	/*
      * core idea:
@@ -277,17 +273,25 @@ static inline void init_port(struct dpdk_port_config *_Nonnull config)
       * and others to process them. The application exchanges packets between cores via rings.
 	 */
 
+	// (notes): so there is "port level" and "queue level" in DPDK
+
 	int retval;
 	struct rte_eth_dev_info dev_info = { 0 };
 	struct rte_eth_conf port_conf = { 0 };
 
-	if (!rte_eth_dev_is_valid_port(config->port_id)) {
-		rte_exit(EXIT_FAILURE, "port %d is not valid configure the device for DPDK first\n", config->port_id);
-	}
+	if (config->rx_mempool == nullptr)
+		return -EINVAL;
+
+	if (!rte_eth_dev_is_valid_port(config->port_id))
+		return -EINVAL;
 
 	retval = rte_eth_dev_info_get(config->port_id, &dev_info);
 	if (retval != 0)
-		rte_exit(EXIT_FAILURE, "Cannot get device info\n");
+		return retval;
+
+	RTE_LOG(INFO, USER1, "Driver: %s, max_rx_queues: %d, max_tx_queues: %d, max_rx_mempools: %d, max_mtu = %d\n",
+		dev_info.driver_name, dev_info.max_rx_queues, dev_info.max_tx_queues, dev_info.max_rx_mempools,
+		dev_info.max_mtu);
 
 #define TX_OFFLOAD_SUPPORTED(flag, rte_flag) ((config->tx_flags & (flag)) && (dev_info.tx_offload_capa & (rte_flag)))
 #define RX_OFFLOAD_SUPPORTED(flag, rte_flag) ((config->rx_flags & (flag)) && (dev_info.rx_offload_capa & (rte_flag)))
@@ -350,35 +354,52 @@ static inline void init_port(struct dpdk_port_config *_Nonnull config)
 		config->nb_tx_queues = dev_info.max_tx_queues;
 	}
 
-	port_conf.link_speeds = RTE_ETH_LINK_SPEED_AUTONEG;
-	port_conf.lpbk_mode = 0;
-
+	// step 1 configure
 	retval = rte_eth_dev_configure(config->port_id, config->nb_rx_queues, config->nb_tx_queues, &port_conf);
 	if (retval < 0)
-		rte_exit(EXIT_FAILURE, "Cannot configure port: %s\n", rte_strerror(-retval));
+		return retval;
 
 	// this already clamps and align descriptors we don't need to do anything
 	retval = rte_eth_dev_adjust_nb_rx_tx_desc(config->port_id, &config->nb_rx_descriptors,
 						  &config->nb_tx_descriptors);
 	if (retval != 0)
-		rte_exit(EXIT_FAILURE, "failed to adjust rx and tx descriptors error: %s\n", rte_strerror(-retval));
+		return retval;
 
+	// step 2 setup tx queue
 	for (uint16_t q = 0; q < config->nb_tx_queues; ++q) {
 		retval = rte_eth_tx_queue_setup(config->port_id, q, config->nb_tx_descriptors,
-						(unsigned int)rte_eth_dev_socket_id(config->port_id), nullptr);
+						(unsigned int)rte_eth_dev_socket_id(config->port_id),
+						&dev_info.default_txconf);
 		if (retval != 0)
-			rte_exit(EXIT_FAILURE, "failed to setup tx queue error: %s\n", rte_strerror(-retval));
+			return retval;
 	}
 
+	// step 3 setup rx queue
 	for (uint16_t q = 0; q < config->nb_rx_queues; ++q) {
-		// (todo): should we create mbuf_pool here or take it in arg ?
-		// we must pass mb_pool otherwise we will get error
+		// (todo): investigate about Multi-segment RX (buffer split)
 		retval = rte_eth_rx_queue_setup(config->port_id, q, config->nb_rx_descriptors,
-						(unsigned int)rte_eth_dev_socket_id(config->port_id), nullptr, nullptr);
+						(unsigned int)rte_eth_dev_socket_id(config->port_id),
+						&dev_info.default_rxconf, config->rx_mempool);
+		if (retval != 0)
+			return retval;
 	};
 
-	printf("driver name = %s\n", dev_info.driver_name);
+	// step 4 start the Ethernet port
+	retval = rte_eth_dev_start(config->port_id);
+	if (retval != 0)
+		return retval;
+
+	struct rte_ether_addr addr = { 0 };
+	retval = rte_eth_macaddr_get(config->port_id, &addr);
+	if (retval != 0)
+		return retval;
+
+	RTE_LOG(INFO, USER1,
+		"Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+		config->port_id, RTE_ETHER_ADDR_BYTES(&addr));
+
 	RTE_LOG(INFO, USER1, "port init success\n");
+	return 0;
 }
 
 [[clang::unavailable("notes")]] static inline void ixgbe_datasheet_notes(void)
@@ -559,25 +580,48 @@ static inline void ring_api(void)
 // roadmap = rte_mempool → rte_mbuf → rte_ethdev (rx)
 void learn()
 {
-	init_eal();
+	int retval;
+	char *argv_temp[] = {
+		"packet-processor",
+		"-l",
+		"0-10", // lcores 0 to 10
+		"-n",
+		"4", // memory channels
+		// "--no-huge", // for dev/testing without hugepages
+		"--log-color",
+	};
+	int argc_temp = sizeof(argv_temp) / sizeof(argv_temp[0]);
 
-	rte_state_init();
-	const struct lcore_state *state = RTE_LCORE_VAR_LCORE(0, lcore_states);
-	printf("a = %d, b = %d\n", state->a, state->b);
+	retval = init_eal(argc_temp, argv_temp);
+	if (retval != 0)
+		rte_exit(EXIT_FAILURE, "EAL initialization failed: %s\n", rte_strerror(-retval));
 
 	mem_pool_lib();
 	mbuf_lib();
-
 	ring_api();
+
+	struct rte_mempool *rx_pool =
+		rte_pktmbuf_pool_create("RX_POOL", 8192, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
+
+	if (rx_pool == nullptr)
+		rte_exit(EXIT_FAILURE, "failed to create rx pool error = %s\n", rte_strerror(rte_errno));
 
 	struct dpdk_port_config config = { .tx_flags = TX_OFFLOAD_IPV4_CKSUM | TX_OFFLOAD_TCP_CKSUM |
 						       TX_OFFLOAD_UDP_CKSUM,
-					   .rx_flags = RX_OFFLOAD_VLAN_STRIP,
-					   .nb_rx_queues = 32,
-					   .nb_tx_queues = 32,
+					   .rx_flags = RX_OFFLOAD_VLAN_STRIP | RX_OFFLOAD_IPV4_CKSUM,
+					   .nb_rx_queues = 1,
+					   .nb_tx_queues = 1,
 					   .nb_rx_descriptors = 128,
-					   .nb_tx_descriptors = 128 };
-	init_port(&config);
+					   .nb_tx_descriptors = 128,
+					   .rx_mempool = rx_pool };
+
+	retval = configure_port(&config);
+	if (retval != 0) {
+		rte_mempool_free(rx_pool);
+		rte_exit(EXIT_FAILURE, "Port initialization failed: %s\n", rte_strerror(-retval));
+	}
+
+	rte_mempool_free(rx_pool);
 
 	// (todo): find out why i am getting seg fault when calling this
 	// rte_eal_cleanup();
