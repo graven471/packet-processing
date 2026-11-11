@@ -25,6 +25,7 @@ add_project_arguments(
   '-Wstrict-prototypes',
   '-Wmissing-prototypes',
   '-Wformat=2',
+  '-Wfunction-effects',
   language: 'c',
 )
 

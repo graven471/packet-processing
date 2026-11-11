@@ -128,9 +128,9 @@ int main(int argc, char **argv)
 
 	struct io_uring_params params = { .flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 0 };
 
-	retval = sz_uring_create(32, &params);
+	struct sz_uring_context *context = sz_uring_create(32, &params);
 
-	if (retval != 0) {
+	if (context == nullptr) {
 		fprintf(stderr, "%s\n", strerror(-retval));
 		return -1;
 	}
@@ -142,7 +142,6 @@ int main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE, "Eal Initialization failed: %s\n", rte_strerror(-retval));
 
 	// create a rx pool
-	// (todo): abstract this into memory subsystem
 	struct rte_mempool *rx_pool =
 		rte_pktmbuf_pool_create("RX_POOL", 8192, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
 
