@@ -1,19 +1,27 @@
 #include "allocator/slab.h"
 #include "dpdk/dpdk.h"
+#include "io_uring/ring_init.h"
 #include "sz/arena.h"
-#include "sz/list.h"
 #include "sz/ring.h"
 #include <assert.h>
 #include <iso646.h>
+#include <linux/io_uring.h>
 #include <pthread.h>
 #include <rte_build_config.h>
+#include <rte_common.h>
+#include <rte_errno.h>
+#include <rte_ethdev.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_core.h>
+#include <rte_mempool.h>
 #include <stdalign.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/cdefs.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -26,6 +34,8 @@
 #include <rte_lcore.h>
 #include <rte_memory.h>
 #include <rte_per_lcore.h>
+
+#include <linux/io_uring.h>
 
 struct User {
 	const char *name;
@@ -58,20 +68,6 @@ typedef struct {
 // to disk etc
 // NIC → DPDK rx thread → parse → ring → io_uring thread → disk
 
-struct process {
-	const char *name; // offset = 0, size = 8
-	uint32_t pid; // offset = 8, size = 4,  4 padding
-	struct list_head node; // offset = 16
-};
-
-static int lcore_hello(__rte_unused void *arg)
-{
-	unsigned lcore_id;
-	lcore_id = rte_lcore_id();
-	printf("hello from core %u\n", lcore_id);
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
 	struct sz_ring *ring = ring_init(32);
@@ -103,21 +99,6 @@ int main(int argc, char **argv)
 
 	arena_destroy(arena);
 
-	// test
-	SZ_LIST_HEAD(process_head);
-
-	struct process a = { .pid = 10, .name = "xwayland" };
-	struct process b = { .pid = 20, .name = "swaybg" };
-
-	list_add_tail(&a.node, &process_head);
-	list_add(&b.node, &process_head);
-
-	struct process *pos;
-
-	list_for_each_entry (pos, &process_head, node) {
-		printf("PID: %d, Name: %s\n", pos->pid, pos->name);
-	}
-
 	struct kmem_cache *cache = kmem_cache_create("itch_order", sizeof(itch_add_order_t));
 	if (!cache) {
 		fprintf(stderr, "failed to create cache");
@@ -141,8 +122,74 @@ int main(int argc, char **argv)
 
 	kmem_cache_free(cache, (void *)order);
 
-	// ================== testing DPDK ==================
-	learn();
+	int retval;
 
-	return 0;
+	// ================== INIT Lord of Rings ===========
+
+	struct io_uring_params params = { .flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 0 };
+
+	retval = sz_uring_create(32, &params);
+
+	if (retval != 0) {
+		fprintf(stderr, "%s\n", strerror(-retval));
+		return -1;
+	}
+
+	// ================== INIT DPDK ==================
+
+	retval = init_eal(argc, argv);
+	if (retval != 0)
+		rte_exit(EXIT_FAILURE, "Eal Initialization failed: %s\n", rte_strerror(-retval));
+
+	// create a rx pool
+	// (todo): abstract this into memory subsystem
+	struct rte_mempool *rx_pool =
+		rte_pktmbuf_pool_create("RX_POOL", 8192, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
+
+	if (rx_pool == nullptr)
+		rte_exit(EXIT_FAILURE, "failed to create rx pool error: %s\n", rte_strerror(rte_errno));
+
+	struct dpdk_port_config config = { .tx_flags = TX_OFFLOAD_IPV4_CKSUM | TX_OFFLOAD_TCP_CKSUM |
+						       TX_OFFLOAD_UDP_CKSUM,
+					   .rx_flags = RX_OFFLOAD_VLAN_STRIP | RX_OFFLOAD_IPV4_CKSUM,
+					   .nb_rx_queues = 1,
+					   .nb_tx_queues = 1,
+					   .nb_rx_descriptors = 128,
+					   .nb_tx_descriptors = 128,
+					   .rx_mempool = rx_pool };
+
+	retval = configure_port(&config);
+	if (retval != 0) {
+		rte_mempool_free(rx_pool);
+		rte_exit(EXIT_FAILURE, "Port initialization failed: %s\n", rte_strerror(-retval));
+	}
+
+	constexpr uint16_t nb_pkts = 32;
+	struct rte_mbuf *rx_pkts[nb_pkts];
+
+	while (1) {
+		uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
+
+		for (uint16_t i = 0; i < nb; ++i) {
+			// this is the metadata
+			const struct rte_mbuf *rx_pkt = rx_pkts[nb];
+			// this points to actual packet buffer but there is a headroom and tailroom
+			// this points to the first byte of that buffer
+			char *buf_addr = rx_pkt->buf_addr;
+			// this points to the actual packet
+			uint64_t packet_start = (uint64_t)((char *)rx_pkt->buf_addr) + rx_pkt->ol_flags;
+			// internally it does: ((t)(void *)((char *)(m)->buf_addr + (m)->data_off + (o)))
+			const uint8_t *data = rte_pktmbuf_mtod(rx_pkt, const uint8_t *);
+			rte_pktmbuf_free(rx_pkts[i]);
+		}
+	}
+
+	rte_mempool_free(rx_pool);
+
+	// (todo): why i am getting seg fault when i call these function
+	// rte_eth_dev_stop(config.port_id);
+	// rte_eth_dev_close(config.port_id);
+	// rte_eal_cleanup();
+
+	return EXIT_SUCCESS;
 }

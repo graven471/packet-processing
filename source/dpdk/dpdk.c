@@ -1,6 +1,5 @@
 #include "dpdk.h"
 #include <asm-generic/errno-base.h>
-#include <errno.h>
 #include <rte_common.h>
 #include <rte_config.h>
 #include <rte_debug.h>
@@ -21,8 +20,6 @@
 #include <rte_ring.h>
 #include <rte_ring_core.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <sys/types.h>
 
 /*
@@ -39,36 +36,7 @@
  * 7. rte_debug : Provides debug helpers
  */
 
-struct lcore_state {
-	int a;
-	int b;
-};
-
-// this lcore_states points to the starting mem_address where struct lcore_state
-// is allocated each CPU have its own data no sharing
-static RTE_LCORE_VAR_HANDLE(struct lcore_state, lcore_states);
-RTE_LCORE_VAR_INIT(lcore_states);
-
-RTE_INIT(rte_state_init)
-{
-	RTE_LCORE_VAR_ALLOC(lcore_states);
-
-	unsigned int lcore_id;
-	struct lcore_state *state;
-	RTE_LCORE_VAR_FOREACH(lcore_id, state, lcore_states)
-	{
-		state->a = 20;
-		state->b = 30;
-	}
-	rte_eal_wait_lcore(lcore_id);
-}
-
-struct foo {
-	const char *name;
-	uint32_t id;
-};
-
-static inline int init_eal(int argc, char **argv)
+int init_eal(int argc, char **argv)
 {
 	int retval = rte_eal_init(argc, argv);
 
@@ -81,171 +49,8 @@ static inline int init_eal(int argc, char **argv)
 	return 0;
 }
 
-// =============== chapter 2 Memory pool libraries ============
-static inline void mem_pool_lib()
-{
-	// a memory pool is an allocator of a fixed-size object (conceptually same as
-	// slab) In the DPDK, it is identified by name and uses a mempool handler to
-	// store free objects. default mempool handler is a ring based.
-
-	// memory pool’s ring of free buffers is MPMC it requires CAS operation to
-	// access it DPDK docs says: To avoid having too many access requests to the
-	// memory pool’s ring, the memory pool allocator can maintain a per-core cache
-	// and do bulk requests to the memory pool’s ring, via the cache with many
-	// fewer locks on the actual memory pool structure. In this way, each core has
-	// full access to its own cache (without locks) of free objects and only when
-	// the cache fills does the core need to shuffle some of the free objects back
-	// to the pools ring or obtain more objects when the cache is empty
-	//
-	// here is how i think it works:
-	// consider ring of free buffers is a power of two ring no wrapping
-	// initially we got a page from mmap say base = 0x1000 and size = 4096
-	// our object_size is 32 so the formula is this:
-	// B(i) = base + i * object_size, where i is the slot index
-	// so we did this and fill up our ring buffer concepually it looks something
-	// like this: Object 0  -> 0x1000 Object 1  -> 0x1020 Object 2  -> 0x1040
-	// Object 3  -> 0x1060
-	// ...
-	// Object 127 -> 0x1FE0
-	// now instead of fetching a free block from this ring everything during init
-	// we can store say 20 object ptr(s) in each CPU cache so, CPU0 stores
-	// object0..19, CPU1 stores object 20..39 etc and during allocation we check
-	// if cache is not empty then just return from cache no lock no CAS nothing
-	// otherwise do CAS and bulk dequeue from shared ring into target cache.
-	// that's the idea if i get it correctly
-
-	struct rte_mempool *first_pool =
-		rte_mempool_create("test",   /* name of the pool */
-				   256,	 /* number of elements in the mempool */
-				   sizeof(struct foo), /* The size of each element.  */
-				   32, /* cache_size thing i described above each CPU will have 32 blocks
-              in there private cache this avoids CAS locks and accessing shared
-              ring for each allocation */
-				   0,  /* size of the private data (todo): learn about this */
-				   nullptr, /* A function pointer that is called for initialization of the
-                  pool, before object initialization. */
-				   nullptr, /* An opaque pointer to data that can be used in the mempool
-                  constructor function */
-				   nullptr, /* A function pointer that is called for each object at
-                  initialization of the pool. The user can set some meta data in
-                  objects if needed */
-				   nullptr, /* An opaque pointer to data that can be used as an argument for
-                  each call to the object constructor function.  */
-				   (int)rte_socket_id(),   /* The socket_id argument is the socket identifier
-                          in the case of NUMA */
-				   RTE_MEMPOOL_F_NO_SPREAD /* The flags arguments is an OR of following
-                                 flags: RTE_MEMPOOL_F_NO_SPREAD,
-                                 RTE_MEMPOOL_F_NO_CACHE_ALIGN,
-                                 RTE_MEMPOOL_F_SP_PUT, RTE_MEMPOOL_F_SC_GET,
-                                 RTE_MEMPOOL_F_NO_IOVA_CONTIG */
-		);
-
-	if (first_pool == nullptr) {
-		rte_exit(EXIT_FAILURE, "mempool create failed: %s\n", rte_strerror(rte_errno));
-	}
-
-	RTE_LOG(INFO, USER1, "Mempool created successfully %p\n", first_pool);
-
-	// now we can access individual objects
-	struct foo *obj;
-
-	if (rte_mempool_get(first_pool, (void **)&obj) == 0) {
-		obj->name = "hey";
-		obj->id = 20;
-
-		// return the object to pool
-		rte_mempool_put(first_pool, obj);
-	}
-
-	// we can get bulk objects like this
-	constexpr unsigned int max_object_count = 20;
-
-	struct foo *objects[max_object_count];
-
-	if (rte_mempool_get_bulk(first_pool, (void **)objects, max_object_count) == 0) {
-		for (unsigned i = 0; i < max_object_count; i++) {
-			objects[i]->name = "foo";
-			objects[i]->id = 40 * i;
-
-			rte_mempool_put_bulk(first_pool, (void **)objects, max_object_count);
-		}
-	}
-
-	// free the pool
-	rte_mempool_free(first_pool);
-	first_pool = nullptr;
-}
-
-static inline void mbuf_lib(void)
-{
-	// struct rte_mbuf represents packet in DPDK rte_mbuf is not a packet itself
-	// its a metadata conceptually this is same as sk_buff in kernel
-	//  docs says:
-	// Message buffers may be used to carry control information, packets, events,
-	// and so on between different entities in the system
-	// in struct rte_mbuf field `buf_addr` describes Virtual address of the
-	// beginning of the data buffer
-	// there is another intresting field called `data_off` cause packet does not starts
-	// from beginning of the buffer there is some headroom and tailroom actual packet is in
-	// between so we do something like data pointer = buf_addr + data_off
-	// buf_addr points to the beginning of the bytes not actual packet starting addr
-
-	struct rte_mempool *foo_pool = rte_mempool_create("foo_packet", 256, sizeof(struct foo), 32, 0, nullptr,
-							  nullptr, nullptr, nullptr, (int)rte_socket_id(),
-							  RTE_MEMPOOL_F_NO_SPREAD);
-
-	if (foo_pool == nullptr) {
-		rte_exit(EXIT_FAILURE, "mempool create failed: %s\n", rte_strerror(rte_errno));
-	}
-
-	// this allocates a new mbuf from a mempool
-	// This new mbuf contains one segment, which has a length of 0.
-	// The pointer to data is initialized to have some bytes of headroom in the buffer (if buffer size allows).
-	struct rte_mbuf *mb = rte_pktmbuf_alloc(foo_pool);
-
-	if (mb == nullptr) {
-		rte_exit(EXIT_FAILURE, "mbuf alloc failed: %s\n", rte_strerror(rte_errno));
-	}
-
-	mb->next = nullptr;
-	mb->buf_len = 20;
-	mb->data_len = 40;
-
-	RTE_LOG(INFO, USER1, "mbuf allocated %p\n", mb);
-
-	rte_pktmbuf_free(mb);
-}
-
-typedef enum : uint64_t {
-	TX_OFFLOAD_VLAN_INSERT = 1ULL << 0,
-	TX_OFFLOAD_IPV4_CKSUM = 1ULL << 1,
-	TX_OFFLOAD_UDP_CKSUM = 1ULL << 2,
-	TX_OFFLOAD_TCP_CKSUM = 1ULL << 3,
-	TX_OFFLOAD_TCP_TSO = 1ULL << 5,
-	TX_OFFLOAD_UDP_TSO = 1ULL << 6,
-} tx_offload_flags;
-
-typedef enum : uint64_t {
-	RX_OFFLOAD_VLAN_STRIP = 1ULL << 0,
-	RX_OFFLOAD_IPV4_CKSUM = 1ULL << 1,
-	RX_OFFLOAD_UDP_CKSUM = 1ULL << 2,
-	RX_OFFLOAD_TCP_CKSUM = 1ULL << 3,
-	RX_OFFLOAD_SCATTER = 1ULL << 13,
-} rx_offload_flags;
-
-struct dpdk_port_config {
-	uint16_t port_id;
-	uint16_t nb_rx_queues;
-	uint16_t nb_tx_queues;
-	uint16_t nb_rx_descriptors;
-	uint16_t nb_tx_descriptors;
-	tx_offload_flags tx_flags;
-	rx_offload_flags rx_flags;
-	struct rte_mempool *_Nonnull rx_mempool; /* (todo): investigate can we have better design */
-};
-
 // eal must needs to be initialized before calling this function
-static inline int configure_port(struct dpdk_port_config *_Nonnull config)
+int configure_port(struct dpdk_port_config *_Nonnull config)
 {
 	/*
      * core idea:
@@ -541,88 +346,4 @@ static inline int configure_port(struct dpdk_port_config *_Nonnull config)
      * 14. The host reads the packet data and sends it to the TCP/IP stack for further processing. The host releases the
      *     associated buffer(s) and descriptor(s) once they are no longer in use.
      */
-}
-
-static inline void ring_api(void)
-{
-	// create's a SPSC ring similar to my ring the size must need to be power of two unless RING_F_EXACT_SZ flag is specified
-	struct rte_ring *ring = rte_ring_create("test", 32, (int)rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
-
-	if (ring == nullptr) {
-		rte_exit(EXIT_FAILURE, "failed to create ring error: %s\n", rte_strerror(rte_errno));
-	}
-
-	// note we can also use burst or bulk enqueue and dequeue
-	for (size_t i = 0; i < 32; ++i) {
-		const struct foo foo = { .id = (uint32_t)i + 2 * 32, .name = "spsc ring" };
-		rte_ring_enqueue(ring, (void *)&foo);
-	}
-
-	// for (size_t i = 0; i < 32; ++i) {
-	// 	struct foo *foo;
-	// 	rte_ring_dequeue(ring, (void **)&foo);
-	// 	printf("id = %d \t name = %s \n", foo->id, foo->name);
-	// }
-
-	struct foo *foo = rte_zmalloc(nullptr, 128, 0);
-
-	if (foo == nullptr) {
-		rte_exit(EXIT_FAILURE, "zmalloc failed %s\n", rte_strerror(rte_errno));
-	}
-
-	foo->id = 20;
-	foo->name = "test";
-
-	rte_free(foo);
-	rte_ring_free(ring);
-}
-
-// roadmap = rte_mempool → rte_mbuf → rte_ethdev (rx)
-void learn()
-{
-	int retval;
-	char *argv_temp[] = {
-		"packet-processor",
-		"-l",
-		"0-10", // lcores 0 to 10
-		"-n",
-		"4", // memory channels
-		// "--no-huge", // for dev/testing without hugepages
-		"--log-color",
-	};
-	int argc_temp = sizeof(argv_temp) / sizeof(argv_temp[0]);
-
-	retval = init_eal(argc_temp, argv_temp);
-	if (retval != 0)
-		rte_exit(EXIT_FAILURE, "EAL initialization failed: %s\n", rte_strerror(-retval));
-
-	mem_pool_lib();
-	mbuf_lib();
-	ring_api();
-
-	struct rte_mempool *rx_pool =
-		rte_pktmbuf_pool_create("RX_POOL", 8192, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
-
-	if (rx_pool == nullptr)
-		rte_exit(EXIT_FAILURE, "failed to create rx pool error = %s\n", rte_strerror(rte_errno));
-
-	struct dpdk_port_config config = { .tx_flags = TX_OFFLOAD_IPV4_CKSUM | TX_OFFLOAD_TCP_CKSUM |
-						       TX_OFFLOAD_UDP_CKSUM,
-					   .rx_flags = RX_OFFLOAD_VLAN_STRIP | RX_OFFLOAD_IPV4_CKSUM,
-					   .nb_rx_queues = 1,
-					   .nb_tx_queues = 1,
-					   .nb_rx_descriptors = 128,
-					   .nb_tx_descriptors = 128,
-					   .rx_mempool = rx_pool };
-
-	retval = configure_port(&config);
-	if (retval != 0) {
-		rte_mempool_free(rx_pool);
-		rte_exit(EXIT_FAILURE, "Port initialization failed: %s\n", rte_strerror(-retval));
-	}
-
-	rte_mempool_free(rx_pool);
-
-	// (todo): find out why i am getting seg fault when calling this
-	// rte_eal_cleanup();
 }
