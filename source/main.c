@@ -6,14 +6,19 @@
 #include <assert.h>
 #include <iso646.h>
 #include <linux/io_uring.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <rte_build_config.h>
+#include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
+#include <rte_ether.h>
+#include <rte_ip4.h>
 #include <rte_mbuf.h>
 #include <rte_mbuf_core.h>
 #include <rte_mempool.h>
+#include <rte_udp.h>
 #include <stdalign.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -122,7 +127,7 @@ int main(int argc, char **argv)
 
 	kmem_cache_free(cache, (void *)order);
 
-	int retval;
+	int retval = 0;
 
 	// ================== INIT Lord of Rings ===========
 
@@ -168,10 +173,10 @@ int main(int argc, char **argv)
 
 	while (1) {
 		uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
-
 		for (uint16_t i = 0; i < nb; ++i) {
 			// this is the metadata
-			const struct rte_mbuf *rx_pkt = rx_pkts[nb];
+			const struct rte_mbuf *rx_pkt = rx_pkts[i];
+
 			// this points to actual packet buffer but there is a headroom and tailroom
 			// this points to the first byte of that buffer
 			char *buf_addr = rx_pkt->buf_addr;
@@ -179,6 +184,30 @@ int main(int argc, char **argv)
 			uint64_t packet_start = (uint64_t)((char *)rx_pkt->buf_addr) + rx_pkt->ol_flags;
 			// internally it does: ((t)(void *)((char *)(m)->buf_addr + (m)->data_off + (o)))
 			const uint8_t *data = rte_pktmbuf_mtod(rx_pkt, const uint8_t *);
+
+			struct rte_ether_hdr *eth = rte_pktmbuf_mtod(rx_pkt, struct rte_ether_hdr *);
+
+			// (todo): if ether type is RTE_ETHER_TYPE_VLAN (0x8100) then there is 4 byte VLAN inserted
+			// before the real ether type in config we have RX_OFFLOAD_VLAN_STRIP so if its true we can
+			// ignore otherwise we have to remove it manually
+			// skip non ipv4 header
+			if (rte_be_to_cpu_16(eth->ether_type) != RTE_ETHER_TYPE_IPV4)
+				continue;
+
+			struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
+
+			uint8_t protocol = ip->next_proto_id;
+
+			// skip non-UDP protocol
+			if (protocol != IPPROTO_UDP)
+				continue;
+
+			// (todo): use IHL to find the real IP header length
+			struct rte_udp_hdr *udp = (struct rte_udp_hdr *)(ip + 1);
+
+			rte_pktmbuf_dump(stdout, rx_pkt, rx_pkt->pkt_len);
+			fflush(stdout);
+
 			rte_pktmbuf_free(rx_pkts[i]);
 		}
 	}

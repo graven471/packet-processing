@@ -203,6 +203,26 @@ int configure_port(struct dpdk_port_config *_Nonnull config)
 		"Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
 		config->port_id, RTE_ETHER_ADDR_BYTES(&addr));
 
+	rte_delay_ms(2000);
+
+	struct rte_eth_link link = { 0 };
+
+	int ret = rte_eth_link_get_nowait(config->port_id, &link);
+	if (ret < 0) {
+		printf("Link query failed: %d\n", ret);
+		return -1;
+	}
+
+	printf("Port %u: ", config->port_id);
+
+	if (link.link_status == RTE_ETH_LINK_UP) {
+		printf("UP | %" PRIu32 " Mbps | %s duplex | %s\n", link.link_speed,
+		       link.link_duplex == RTE_ETH_LINK_FULL_DUPLEX ? "Full" : "Half",
+		       link.link_autoneg == RTE_ETH_LINK_AUTONEG ? "Auto-negotiation" : "Fixed");
+	} else {
+		printf("DOWN\n");
+	}
+
 	RTE_LOG(INFO, USER1, "port init success\n");
 	return 0;
 }
