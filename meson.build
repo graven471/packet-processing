@@ -37,6 +37,7 @@ sources = files(
   'source/allocator/slab.c',
   'source/dpdk/dpdk.c',
   'source/io_uring/ring_init.c',
+  'source/io_uring/ring_ops.c',
   'source/main.c',
   'source/sz/arena.c',
   'source/sz/freelist.c',

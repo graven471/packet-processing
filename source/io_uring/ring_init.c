@@ -84,7 +84,7 @@ struct sz_uring_context *sz_uring_create(const uint32_t entries, struct io_uring
 	memset(context, 0, sizeof(struct sz_uring_context));
 
 	context->fd = ring_fd;
-	context->features = params->features;
+	context->flags = params->flags;
 	context->sq_entries = entries;
 
 	context->sq_ring = mmap(nullptr, sq_ring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,
@@ -110,7 +110,7 @@ struct sz_uring_context *sz_uring_create(const uint32_t entries, struct io_uring
 		}
 	}
 
-#define RING_FIELD(ptr, value) (uint32_t *)((char *)ptr) + value;
+#define RING_FIELD(ptr, value) (uint32_t *)((char *)(ptr) + (value))
 
 	context->sq_head = RING_FIELD(context->sq_ring, params->sq_off.head);
 	context->sq_tail = RING_FIELD(context->sq_ring, params->sq_off.tail);
@@ -118,7 +118,7 @@ struct sz_uring_context *sz_uring_create(const uint32_t entries, struct io_uring
 	context->sq_array = RING_FIELD(context->sq_ring, params->sq_off.array);
 	context->sq_flags = RING_FIELD(context->sq_ring, params->sq_off.flags);
 	context->sq_size = sq_ring_sz;
-	context->__cached_sq_tail = context->sq_tail;
+	context->__cached_sq_tail = 0;
 
 	// submission queue entries array
 	context->sqes = mmap(nullptr, params->sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE,
@@ -131,10 +131,10 @@ struct sz_uring_context *sz_uring_create(const uint32_t entries, struct io_uring
 	context->cq_tail = RING_FIELD(context->cq_ring, params->cq_off.tail);
 	context->cq_mask = RING_FIELD(context->cq_ring, params->cq_off.ring_mask);
 	context->cq_size = cq_ring_sz;
-	context->__cached_cq_tail = context->cq_tail;
+	context->__cached_cq_head = 0;
 
 	// completion queue arrays
-	context->cqes = (struct io_uring_cqe *)((char *)context->cq_ring) + params->cq_off.cqes;
+	context->cqes = (struct io_uring_cqe *)((char *)context->cq_ring + params->cq_off.cqes);
 
 	return context;
 
@@ -151,7 +151,7 @@ struct io_uring_sqe *sz_uring_get_sqe(struct sz_uring_context *_Nonnull ring)
 {
 	uint32_t head = io_uring_smp_load_acquire(ring->sq_head);
 	uint32_t tail = io_uring_smp_load_relaxed(ring->sq_tail);
-	uint32_t pending = *ring->__cached_sq_tail;
+	uint32_t pending = ring->__cached_sq_tail;
 
 	if ((tail + pending - head) >= ring->sq_entries) [[clang::unlikely]]
 		return nullptr;
@@ -164,29 +164,30 @@ struct io_uring_sqe *sz_uring_get_sqe(struct sz_uring_context *_Nonnull ring)
 	return sqe;
 }
 
-inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring)
+int sz_uring_submit(struct sz_uring_context *_Nonnull ring)
 {
 	// (todo): check flags if IORING_SETUP_SQPOLL is set then we need to call wakeup
-	// using io_uring_enter syscall
+	// using sz_uring_enter syscall
+	// SQEs are added to the tail of the submission queue. The kernel picks up SQEs off the head of the SQ
 
 	// since we are the only one who updates the tail we don't need sync
 	uint32_t tail = io_uring_smp_load_relaxed(ring->sq_tail);
-	uint32_t pending = *ring->__cached_sq_tail;
+	uint32_t pending = ring->__cached_sq_tail;
 
 	if (pending == 0) [[clang::unlikely]]
 		return 0;
 
-	// fill the sqe_entry into the sqe ring array
+	// (todo): investigate IORING_SETUP_NO_SQARRAY
 	for (uint32_t i = 0; i < pending; ++i) {
 		uint32_t index = (tail + i) & *ring->sq_mask;
 		ring->sq_array[index] = index;
-		index = (tail + i) & *ring->sq_mask;
 	}
 
-	// if this feature is not set then we must need to do io_uring_enter manually
-	if (!(ring->features & IORING_SETUP_SQPOLL)) [[clang::unlikely]] {
+	// if this feature is not set then we must need to do sz_uring_enter manually
+	if (!(ring->flags & IORING_SETUP_SQPOLL)) [[clang::unlikely]] {
+		io_uring_smp_store_release(ring->sq_tail, (tail + pending));
 		// (todo): currently we are not waiting for any request to be completed
-		int retval = io_uring_enter(ring->fd, pending, 0, 0, nullptr);
+		int retval = sz_uring_enter(ring->fd, pending, 0, 0, nullptr);
 
 		if (retval < 0) [[clang::unlikely]]
 			// this is hard error nothing got submitted so here we can just return error
@@ -195,31 +196,69 @@ inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring)
 		if ((uint32_t)retval < pending) [[clang::unlikely]] {
 			uint32_t sub_rem = pending - (uint32_t)retval;
 			io_uring_smp_store_release(ring->sq_tail, (tail + pending - sub_rem));
-			*ring->__cached_sq_tail = sub_rem;
+			ring->__cached_sq_tail = sub_rem;
 			return (int)sub_rem;
 		}
 
 		// here we know all request has been succeeded
-		io_uring_smp_store_release(ring->sq_tail, (tail + pending));
 		// reset cache
 		ring->__cached_sq_tail = 0;
 		return (int)pending;
 	}
 
-	if (ring->features & IORING_SETUP_SQPOLL) [[clang::likely]] {
+	if (ring->flags & IORING_SETUP_SQPOLL) [[clang::likely]] {
 		// wakeup the kernel thread guten morgen i guess
 		if (*ring->sq_flags & IORING_SQ_NEED_WAKEUP) {
 			// this will not fail i guess
-			io_uring_enter(ring->fd, 0, 0, IORING_ENTER_SQ_WAKEUP, nullptr);
+			sz_uring_enter(ring->fd, 0, 0, IORING_ENTER_SQ_WAKEUP, nullptr);
 		}
 	}
 
 	// there is no way for us to know how many request got succeed in IORING_SETUP_SQPOLL kernel
-	// picks up asynchronously so yeah for now its inconsistence and i don't know how to fix it
-	// btw very few people knows that there is a "t" in inconsistence xiexie
+	// picks up asynchronously
 	io_uring_smp_store_release(ring->sq_tail, (tail + pending));
 	ring->__cached_sq_tail = 0;
 	return (int)pending;
+}
+
+struct io_uring_cqe *sz_uring_cq_peek(struct sz_uring_context *_Nonnull ring) [[clang::nonblocking]]
+{
+	uint32_t tail = io_uring_smp_load_acquire(ring->cq_tail);
+	uint32_t head = io_uring_smp_load_relaxed(ring->cq_head);
+
+	if (head == tail) [[clang::unlikely]]
+		return nullptr;
+
+	uint32_t index = head & *ring->cq_mask;
+	struct io_uring_cqe *cqe = &ring->cqes[index];
+
+	ring->__cached_cq_head++;
+	return cqe;
+}
+
+[[gnu::hot, clang::always_inline]] struct io_uring_cqe *sz_uring_cq_peek_wait(struct sz_uring_context *_Nonnull ring)
+	[[clang::blocking]]
+{
+	uint32_t tail = io_uring_smp_load_acquire(ring->cq_tail);
+	uint32_t head = io_uring_smp_load_relaxed(ring->cq_head) + ring->__cached_cq_head;
+
+	// wait for atleast one event
+	if (head == tail)
+		sz_uring_enter(ring->fd, 0, 1, IORING_ENTER_GETEVENTS, nullptr);
+
+	uint32_t index = head & *ring->cq_mask;
+	struct io_uring_cqe *cqe = &ring->cqes[index];
+	ring->__cached_cq_head++;
+	return cqe;
+}
+
+[[gnu::hot, clang::always_inline]] int sz_uring_cq_seen(struct sz_uring_context *_Nonnull ring)
+{
+	uint32_t head = io_uring_smp_load_acquire(ring->cq_head);
+	io_uring_smp_store_release(ring->cq_head, head + ring->__cached_cq_head);
+	int n = ring->__cached_cq_head;
+	ring->__cached_cq_head = 0;
+	return n;
 }
 
 void sz_uring_destroy(struct sz_uring_context *_Nonnull ctx)
@@ -229,7 +268,7 @@ void sz_uring_destroy(struct sz_uring_context *_Nonnull ctx)
 
 	close(ctx->fd);
 	munmap(ctx->sq_ring, ctx->sq_size);
-	if (!(ctx->features & IORING_FEAT_SINGLE_MMAP))
+	if (!(ctx->flags & IORING_FEAT_SINGLE_MMAP))
 		munmap(ctx->cq_ring, ctx->cq_size);
 	free(ctx);
 }

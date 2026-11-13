@@ -6,8 +6,8 @@
 // we want head and tail in different cache lines so producer and consumer
 // can modify head and tail without affecting each other cache line
 struct sz_ring {
-	_Alignas(64) _Atomic uint32_t head;
-	_Alignas(64) _Atomic uint32_t tail;
+	alignas(64) _Atomic uint32_t head;
+	alignas(64) _Atomic uint32_t tail;
 	size_t capacity; /* power of two */
 	uint32_t mask; /* capacity - 1 */
 	void *data;

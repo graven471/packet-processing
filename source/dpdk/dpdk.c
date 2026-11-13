@@ -207,9 +207,9 @@ int configure_port(struct dpdk_port_config *_Nonnull config)
 
 	struct rte_eth_link link = { 0 };
 
-	int ret = rte_eth_link_get_nowait(config->port_id, &link);
-	if (ret < 0) {
-		printf("Link query failed: %d\n", ret);
+	retval = rte_eth_link_get_nowait(config->port_id, &link);
+	if (retval < 0) {
+		printf("Link query failed: %d\n", retval);
 		return -1;
 	}
 

@@ -1,9 +1,12 @@
 #include "allocator/slab.h"
 #include "dpdk/dpdk.h"
 #include "io_uring/ring_init.h"
+#include "io_uring/ring_ops.h"
+#include "io_uring/syscall.h"
 #include "sz/arena.h"
 #include "sz/ring.h"
 #include <assert.h>
+#include <fcntl.h>
 #include <iso646.h>
 #include <linux/io_uring.h>
 #include <netinet/in.h>
@@ -131,12 +134,95 @@ int main(int argc, char **argv)
 
 	// ================== INIT Lord of Rings ===========
 
-	struct io_uring_params params = { .flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 0 };
-	struct sz_uring_context *context = sz_uring_create(32, &params);
+	struct io_uring_params params = { .flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 500 };
+	struct sz_uring_context *context = sz_uring_create(128, &params);
 
 	if (context == nullptr) {
 		fprintf(stderr, "%s\n", strerror(-retval));
 		return -1;
+	}
+
+	// =========== temp code =================
+	constexpr uint32_t sqes_size = 8;
+	struct io_uring_sqe *sqes[sqes_size];
+
+	for (uint32_t i = 0; i < sqes_size; ++i) {
+		sqes[i] = sz_uring_get_sqe(context);
+		if (sqes[i] == nullptr) {
+			fprintf(stderr, "failed to fetch sqe at index %u\n", i);
+			sz_uring_destroy(context);
+			return -1;
+		}
+		sqes[i]->opcode = IORING_OP_NOP;
+		sqes[i]->fd = -1;
+		sqes[i]->user_data = 0xdeadbeef;
+		printf("sqe[%u] addr = %p\n", i, sqes[i]);
+	}
+
+	int n = sz_uring_submit(context);
+
+	if (n < 0) {
+		fprintf(stderr, "failed to submit sqe(s) %s\n", strerror(-n));
+		sz_uring_destroy(context);
+		return -1;
+	}
+
+	printf("submitted %d sqes\n", n);
+	printf("pending is %u\n", context->__cached_sq_tail);
+
+	sz_uring_enter(context->fd, 0, 1, IORING_ENTER_GETEVENTS, nullptr);
+
+	for (uint32_t i = 0; i < sqes_size; ++i) {
+		struct io_uring_cqe *cqes = sz_uring_cq_peek(context);
+		if (cqes == nullptr) {
+			printf("ring is empty\n");
+			continue;
+		}
+		printf("cqe[%u] user_data = %llx res = %d\n", i, cqes[i].user_data, cqes[i].res);
+	}
+
+	n = sz_uring_cq_seen(context);
+	printf("seen = %d\n", n);
+
+	struct io_uring_sqe *sqe = sz_uring_prep_openat(context, AT_FDCWD, "meson.build", O_RDONLY, 0644);
+
+	if (sqe == nullptr)
+		return -1;
+
+	sqe->user_data = 0xffdd;
+
+	sz_uring_submit(context);
+
+	struct io_uring_cqe *cqe = sz_uring_cq_peek_wait(context);
+
+	char buf[4096];
+
+	if (cqe == nullptr)
+		return -1;
+
+	if (cqe->user_data == 0xffdd) {
+		sz_uring_cq_seen(context);
+		if (cqe->res < 0) {
+			printf("openat failed %s\n", strerror(-cqe->res));
+			return -1;
+		}
+		sqe = sz_uring_prep_read(context, cqe->res, 0, buf, 4096);
+
+		if (sqe == nullptr)
+			return -1;
+
+		sqe->user_data = 0x1010;
+		sz_uring_submit(context);
+	}
+
+	cqe = sz_uring_cq_peek_wait(context);
+
+	if (cqe != nullptr) {
+		sz_uring_cq_seen(context);
+
+		if (cqe->res > 0) {
+			printf("%.*s", cqe->res, buf);
+		}
 	}
 
 	// ================== INIT DPDK ==================
@@ -172,6 +258,7 @@ int main(int argc, char **argv)
 	 * struct rte_mubf is just a metadata actual data lives at rte_mbuf.buf_addr
 	 * buf_addr is that starting address there is actually headroom then packet then tailroom
 	 * we do buf_addr + rte_mbuf.data_off to get to the start of the actual packet
+	 * but there is only one allocation for struct rte_mbuf and data
 	 * for UDP packet the layout is following:
 	 *  0x1000
 	 *  _______________________________________
@@ -197,8 +284,9 @@ int main(int argc, char **argv)
 		uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
 		for (uint16_t i = 0; i < nb; ++i) {
 			// this is the metadata
-			const struct rte_mbuf *rx_pkt = rx_pkts[i];
-			struct rte_ether_hdr *eth = rte_pktmbuf_mtod(rx_pkt, struct rte_ether_hdr *);
+			const struct rte_mbuf *pkt = rx_pkts[i];
+			// L2
+			struct rte_ether_hdr *eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
 			// (todo): if ether type is RTE_ETHER_TYPE_VLAN (0x8100) then there is 4 byte VLAN inserted
 			// before the real ether type in config we have RX_OFFLOAD_VLAN_STRIP so if its true we can
@@ -207,16 +295,19 @@ int main(int argc, char **argv)
 			if (rte_be_to_cpu_16(eth->ether_type) != RTE_ETHER_TYPE_IPV4)
 				continue;
 
-			struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
+			// rte_ether_hdr is always 14 bytes fixed
+			// L3
+			const struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
 			uint8_t protocol = ip->next_proto_id;
 
 			// skip non-UDP protocol
 			if (protocol != IPPROTO_UDP)
 				continue;
 
-			struct rte_udp_hdr *udp = (struct rte_udp_hdr *)((uint8_t *)ip + ip->ihl * 4);
+			// L4
+			const struct rte_udp_hdr *udp = (struct rte_udp_hdr *)((uint8_t *)ip + ip->ihl * 4);
 
-			rte_pktmbuf_dump(stdout, rx_pkt, rx_pkt->pkt_len);
+			rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 			fflush(stdout);
 
 			// (todo): do not free in hot path free later

@@ -13,7 +13,7 @@ struct sz_uring_context {
 	unsigned int fd;
 
 	uint32_t sq_entries;
-	uint32_t features;
+	uint32_t flags;
 
 	void *sq_ring;
 	void *cq_ring;
@@ -33,8 +33,8 @@ struct sz_uring_context {
 	uint32_t *cq_tail;
 	size_t cq_size;
 
-	uint32_t *__cached_sq_tail;
-	uint32_t *__cached_cq_tail;
+	uint32_t __cached_sq_tail;
+	uint32_t __cached_cq_head;
 };
 
 [[nodiscard("check the result before using the context"), gnu::cold]] struct sz_uring_context *
@@ -43,6 +43,15 @@ sz_uring_create(const uint32_t entries, struct io_uring_params *_Nonnull params)
 // get a seq returns nullptr if there is no usable sqe
 [[gnu::always_inline]] struct io_uring_sqe *sz_uring_get_sqe(struct sz_uring_context *_Nonnull ring)
 	[[clang::nonblocking]];
-[[gnu::hot]] inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring);
+[[gnu::hot]] int sz_uring_submit(struct sz_uring_context *_Nonnull ring);
+
+[[gnu::hot, clang::always_inline]] struct io_uring_cqe *sz_uring_cq_peek(struct sz_uring_context *_Nonnull ring)
+	[[clang::nonblocking]];
+
+// if cq ring is empty the it waits for atleast one entry before returning
+[[gnu::hot, clang::always_inline]] struct io_uring_cqe *sz_uring_cq_peek_wait(struct sz_uring_context *_Nonnull ring)
+	[[clang::blocking]];
+
+[[gnu::hot, clang::always_inline]] int sz_uring_cq_seen(struct sz_uring_context *_Nonnull ring);
 
 [[gnu::cold]] void sz_uring_destroy(struct sz_uring_context *_Nonnull ctx);
