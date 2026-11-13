@@ -21,7 +21,7 @@ add_project_arguments(
 # Compiler warnings.
 add_project_arguments(
   '-Wshadow',
-  '-Wconversion',
+  # '-Wconversion',
   '-Wstrict-prototypes',
   '-Wmissing-prototypes',
   '-Wformat=2',

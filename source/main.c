@@ -132,7 +132,6 @@ int main(int argc, char **argv)
 	// ================== INIT Lord of Rings ===========
 
 	struct io_uring_params params = { .flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 0 };
-
 	struct sz_uring_context *context = sz_uring_create(32, &params);
 
 	if (context == nullptr) {
@@ -169,6 +168,29 @@ int main(int argc, char **argv)
 	}
 
 	constexpr uint16_t nb_pkts = 32;
+	/*
+	 * struct rte_mubf is just a metadata actual data lives at rte_mbuf.buf_addr
+	 * buf_addr is that starting address there is actually headroom then packet then tailroom
+	 * we do buf_addr + rte_mbuf.data_off to get to the start of the actual packet
+	 * for UDP packet the layout is following:
+	 *  0x1000
+	 *  _______________________________________
+	 * | ethernet header 14 bytes              |
+	 * | mac{src, addr} and ether_type         |
+	 * |_______________________________________|
+	 *  0x100E
+	 * |----------------------------------------|
+	 * | ipv4 header 20 bytes ignoring options  |
+	 * |________________________________________|
+	 * 0x1022
+	 * |----------------------------------------|
+	 * |           udp header 8 bytes           |
+	 * |________________________________________|
+	 * 0x102A
+	 * |----------------------------------------|
+	 * |           payload n bytes              |
+	 * |________________________________________|
+	 */
 	struct rte_mbuf *rx_pkts[nb_pkts];
 
 	while (1) {
@@ -176,15 +198,6 @@ int main(int argc, char **argv)
 		for (uint16_t i = 0; i < nb; ++i) {
 			// this is the metadata
 			const struct rte_mbuf *rx_pkt = rx_pkts[i];
-
-			// this points to actual packet buffer but there is a headroom and tailroom
-			// this points to the first byte of that buffer
-			char *buf_addr = rx_pkt->buf_addr;
-			// this points to the actual packet
-			uint64_t packet_start = (uint64_t)((char *)rx_pkt->buf_addr) + rx_pkt->ol_flags;
-			// internally it does: ((t)(void *)((char *)(m)->buf_addr + (m)->data_off + (o)))
-			const uint8_t *data = rte_pktmbuf_mtod(rx_pkt, const uint8_t *);
-
 			struct rte_ether_hdr *eth = rte_pktmbuf_mtod(rx_pkt, struct rte_ether_hdr *);
 
 			// (todo): if ether type is RTE_ETHER_TYPE_VLAN (0x8100) then there is 4 byte VLAN inserted
@@ -195,19 +208,18 @@ int main(int argc, char **argv)
 				continue;
 
 			struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
-
 			uint8_t protocol = ip->next_proto_id;
 
 			// skip non-UDP protocol
 			if (protocol != IPPROTO_UDP)
 				continue;
 
-			// (todo): use IHL to find the real IP header length
-			struct rte_udp_hdr *udp = (struct rte_udp_hdr *)(ip + 1);
+			struct rte_udp_hdr *udp = (struct rte_udp_hdr *)((uint8_t *)ip + ip->ihl * 4);
 
 			rte_pktmbuf_dump(stdout, rx_pkt, rx_pkt->pkt_len);
 			fflush(stdout);
 
+			// (todo): do not free in hot path free later
 			rte_pktmbuf_free(rx_pkts[i]);
 		}
 	}

@@ -203,6 +203,7 @@ inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring)
 		io_uring_smp_store_release(ring->sq_tail, (tail + pending));
 		// reset cache
 		ring->__cached_sq_tail = 0;
+		return (int)pending;
 	}
 
 	if (ring->features & IORING_SETUP_SQPOLL) [[clang::likely]] {

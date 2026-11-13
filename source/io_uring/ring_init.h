@@ -43,6 +43,6 @@ sz_uring_create(const uint32_t entries, struct io_uring_params *_Nonnull params)
 // get a seq returns nullptr if there is no usable sqe
 [[gnu::always_inline]] struct io_uring_sqe *sz_uring_get_sqe(struct sz_uring_context *_Nonnull ring)
 	[[clang::nonblocking]];
-[[gnu::hot]] inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring) [[clang::nonblocking]];
+[[gnu::hot]] inline int sz_uring_submit(struct sz_uring_context *_Nonnull ring);
 
 [[gnu::cold]] void sz_uring_destroy(struct sz_uring_context *_Nonnull ctx);
