@@ -43,15 +43,17 @@ sources = files(
   'source/sz/freelist.c',
   'source/sz/list.c',
   'source/sz/ring.c',
+  'source/vk/vk_init.c',
 )
 
 inc = include_directories('source/')
 dpdk = dependency('libdpdk')
+vulkan = dependency('vulkan')
 
 executable(
   'packet-processor',
   sources,
   include_directories: inc,
-  dependencies: [threads, dpdk],
+  dependencies: [threads, dpdk, vulkan],
   install: true,
 )
