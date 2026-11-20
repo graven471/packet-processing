@@ -141,7 +141,7 @@ int main(int argc, char **argv)
 	}
 
 	// =================== init vulkan video ===================
-	struct vk_context *vk = vk_context_init(nullptr);
+	struct vk_context *vk = vk_context_init();
 	if (vk == nullptr) {
 		sz_uring_destroy(uring);
 		return -1;

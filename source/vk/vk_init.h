@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lib/volk.h>
+#include <vulkan/vulkan_core.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,9 +19,13 @@ struct vk_context {
 	VkInstance instance;
 	VkPhysicalDevice gpu;
 	VkDevice device;
+	VkQueue graphics_queue;
+	VkQueue decode_queue;
+	VkVideoSessionKHR video_session;
+	bool shared;
 };
 
-struct vk_context *vk_context_init(const char *const *instance_extensions);
+struct vk_context *vk_context_init();
 void vk_context_destroy(struct vk_context *context);
 
 #ifdef __cplusplus

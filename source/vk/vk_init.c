@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vulkan/vk_platform.h>
 #include <vulkan/vulkan_core.h>
 
 struct gpu_candidate {
@@ -26,6 +27,10 @@ struct gpu_candidate {
 		typeof(b) _b = (b); \
 		_a > _b ? _a : _b;  \
 	})
+
+#define ARRAY_SIZE(arr)                                                                              \
+	(sizeof(struct { int : -!!__builtin_types_compatible_p(typeof(arr), typeof(&(arr)[0])); }) + \
+	 sizeof(arr) / sizeof((arr)[0]))
 
 /*
  * i have n gpu(s) and i am looping over each of them ok and finding its props extensions etc
@@ -84,7 +89,7 @@ struct gpu_candidate {
 
 		VkVideoDecodeH264ProfileInfoKHR h264_profile = {
 			.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR,
-			.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN,
+			.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_HIGH,
 		};
 
 		VkVideoProfileInfoKHR profile = {
@@ -102,8 +107,8 @@ struct gpu_candidate {
 			candiates[idx].score += 300;
 
 		for (uint32_t i = 0; i < ext_count; ++i) {
-			if (strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) ||
-			    strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) ||
+			if (strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) == 0 ||
+			    strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) == 0 ||
 			    strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME) == 0)
 				candiates[idx].score += 400;
 
@@ -172,7 +177,33 @@ struct gpu_candidate {
 	return selected;
 }
 
-struct vk_context *vk_context_init(const char *const *instance_extensions)
+static VKAPI_ATTR VkBool32 VKAPI_CALL
+debug_utils_callback([[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT msg_severity,
+		     [[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT msg_type,
+		     const VkDebugUtilsMessengerCallbackDataEXT *callback_data, [[maybe_unused]] void *user_data)
+{
+	printf("[VK] %s\n", callback_data->pMessage);
+	return false;
+}
+
+[[clang::internal_linkage]] static inline void setup_debug_messenger(VkInstance instance)
+{
+	VkDebugUtilsMessengerCreateInfoEXT create_info = {
+		.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+		.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+				   VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+				   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+		.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+			       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT |
+			       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+		.pfnUserCallback = debug_utils_callback,
+	};
+
+	VkDebugUtilsMessengerEXT messenger = {};
+	VK_CHECK(vkCreateDebugUtilsMessengerEXT(instance, &create_info, nullptr, &messenger));
+}
+
+struct vk_context *vk_context_init()
 {
 	VK_CHECK(volkInitialize());
 
@@ -190,14 +221,32 @@ struct vk_context *vk_context_init(const char *const *instance_extensions)
 				       .pEngineName = "NoEngine",
 				       .apiVersion = required_api_version };
 
+	const char *instance_extensions[] = {
+		"VK_KHR_surface",
+		"VK_KHR_wayland_surface",
+#ifdef DEBUG_BUILD
+		VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+#endif
+	};
+
+	const char *layer_names = "VK_LAYER_KHRONOS_validation";
+
 	VkInstanceCreateInfo inst_info = {
 		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
 		.pApplicationInfo = &app_info,
-		.enabledExtensionCount = 0,
-		.ppEnabledExtensionNames = nullptr,
-		.enabledLayerCount = 0,
+		.enabledExtensionCount = (uint32_t)ARRAY_SIZE(instance_extensions),
+		.ppEnabledExtensionNames = instance_extensions,
 		.ppEnabledLayerNames = nullptr,
+		.enabledLayerCount = 0,
 	};
+
+#ifdef DEBUG_BUILD
+	inst_info.ppEnabledLayerNames = &layer_names;
+	inst_info.enabledLayerCount = 1;
+#else
+	inst_info.ppEnabledLayerNames = NULL;
+	inst_info.enabledLayerCount = 0;
+#endif
 
 	struct vk_context *self = malloc(sizeof(struct vk_context));
 
@@ -208,6 +257,8 @@ struct vk_context *vk_context_init(const char *const *instance_extensions)
 
 	VkInstance instance = self->instance;
 	volkLoadInstance(instance);
+
+	setup_debug_messenger(instance);
 
 	uint32_t physical_device_count = 0;
 	VK_CHECK(vkEnumeratePhysicalDevices(instance, &physical_device_count, nullptr));
@@ -220,6 +271,129 @@ struct vk_context *vk_context_init(const char *const *instance_extensions)
 
 	struct gpu_candidate selected_gpu = select_preferred_gpu(physical_devices, physical_device_count);
 	printf("selected GPU = (%s)\n", selected_gpu.props.deviceName);
+	self->gpu = selected_gpu.device;
+
+	const float queue_priorities = 1.0f;
+
+	struct VkDeviceQueueCreateInfo queue_infos[2];
+	uint32_t queue_count = 0;
+
+	queue_infos[queue_count++] = (VkDeviceQueueCreateInfo){ .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+								.queueCount = 1,
+								.queueFamilyIndex = selected_gpu.decode_queue_idx,
+								.pQueuePriorities = &queue_priorities };
+
+	if (selected_gpu.b_has_graphics_support && selected_gpu.decode_queue_idx != selected_gpu.graphics_queue_idx)
+		queue_infos[queue_count++] =
+			(VkDeviceQueueCreateInfo){ .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+						   .queueCount = 1,
+						   .queueFamilyIndex = selected_gpu.graphics_queue_idx,
+						   .pQueuePriorities = &queue_priorities };
+
+	const char *device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+					    VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+					    VK_KHR_VIDEO_QUEUE_EXTENSION_NAME };
+
+	VkPhysicalDeviceVulkan13Features features13 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+		.dynamicRendering = VK_TRUE,
+		.synchronization2 = VK_TRUE,
+	};
+
+	VkPhysicalDeviceFeatures device_features = {
+		.samplerAnisotropy = VK_TRUE,
+	};
+
+	VkDeviceCreateInfo device_info = {
+		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+		.queueCreateInfoCount = queue_count,
+		.pQueueCreateInfos = queue_infos,
+		.enabledExtensionCount = (uint32_t)ARRAY_SIZE(device_extensions),
+		.ppEnabledExtensionNames = device_extensions,
+		.pEnabledFeatures = &device_features,
+		.pNext = &features13,
+	};
+
+	VK_CHECK(vkCreateDevice(selected_gpu.device, &device_info, nullptr, &self->device));
+
+	volkLoadDevice(self->device);
+
+	vkGetDeviceQueue(self->device, selected_gpu.decode_queue_idx, 0, &self->decode_queue);
+
+	if (selected_gpu.b_has_graphics_support && selected_gpu.decode_queue_idx != selected_gpu.graphics_queue_idx) {
+		vkGetDeviceQueue(self->device, selected_gpu.graphics_queue_idx, 0, &self->graphics_queue);
+		self->shared = false;
+	} else {
+		self->graphics_queue = self->decode_queue;
+		self->shared = true;
+	}
+
+	// ======================== creating session for H264 =====================
+	VkVideoDecodeH264CapabilitiesKHR h264_caps = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR,
+	};
+
+	VkVideoDecodeCapabilitiesKHR decode_caps = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR,
+		.pNext = &h264_caps,
+	};
+
+	VkVideoCapabilitiesKHR capabilities = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR,
+		.pNext = &decode_caps,
+	};
+
+	VkVideoDecodeH264ProfileInfoKHR h264_profile = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR,
+		.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_HIGH,
+	};
+
+	VkVideoProfileInfoKHR profile = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR,
+		.pNext = &h264_profile,
+		.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR,
+		.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,
+		.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,
+		.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,
+	};
+
+	VK_CHECK(vkGetPhysicalDeviceVideoCapabilitiesKHR(self->gpu, &profile, &capabilities));
+
+	VkVideoSessionCreateInfoKHR session_create_info = {
+		.sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR,
+		.maxCodedExtent = (VkExtent2D){ .width = 1920, .height = 1080 },
+		.maxDpbSlots = capabilities.maxDpbSlots,
+		.maxActiveReferencePictures = capabilities.maxActiveReferencePictures,
+		.queueFamilyIndex = selected_gpu.decode_queue_idx,
+		/* image format of the decoded output */
+		.pictureFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+		.referencePictureFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+		.pStdHeaderVersion = &capabilities.stdHeaderVersion,
+		.pVideoProfile = &profile,
+	};
+
+	VK_CHECK(vkCreateVideoSessionKHR(self->device, &session_create_info, nullptr, &self->video_session));
+
+	uint32_t req_counts = 0;
+	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &req_counts, nullptr));
+
+	VkVideoSessionMemoryRequirementsKHR mem_requirements[req_counts];
+	memset(mem_requirements, 0, sizeof(mem_requirements));
+
+	for (uint32_t i = 0; i < req_counts; ++i)
+		mem_requirements[i].sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR;
+
+	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &req_counts,
+							mem_requirements));
+
+	// now for each of req_counts allocate a compatible VkDeviceMemory and bind it using VkBindVideoSessionMemoryInfoKHR
+
+	for (uint32_t req = 0; req < req_counts; ++req) {
+		printf("bind_index = %u, alignment = %lu, size = %lu, memory_type = %d\n",
+		       mem_requirements[req].memoryBindIndex, mem_requirements[req].memoryRequirements.alignment,
+		       mem_requirements[req].memoryRequirements.size,
+		       mem_requirements[req].memoryRequirements.memoryTypeBits);
+	}
 
 	return self;
 }

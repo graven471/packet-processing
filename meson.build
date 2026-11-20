@@ -31,6 +31,10 @@ add_project_arguments(
   language: 'c',
 )
 
+if get_option('buildtype').startswith('debug')
+  add_project_arguments('-DDEBUG_BUILD=1', language: 'c')
+endif
+
 # Dependencies.
 threads = dependency('threads')
 
