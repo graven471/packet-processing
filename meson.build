@@ -1,10 +1,12 @@
 project(
   'packet-processor',
   'c',
+  'cpp',
   version: '0.1.0',
   meson_version: '>=1.3.0',
   default_options: [
     'c_std=gnu23',
+    'cpp_std=c++23',
     'warning_level=2',
     'buildtype=debugoptimized',
   ],
@@ -33,7 +35,7 @@ add_project_arguments(
 threads = dependency('threads')
 
 # Sources.
-sources = files(
+c_sources = files(
   'source/allocator/slab.c',
   'source/dpdk/dpdk.c',
   'source/io_uring/ring_init.c',
@@ -44,7 +46,10 @@ sources = files(
   'source/sz/list.c',
   'source/sz/ring.c',
   'source/vk/vk_init.c',
+  'source/vk/volk_impl.c',
 )
+
+cpp_sources = files('source/vk/vk_test.cpp')
 
 inc = include_directories('source/')
 dpdk = dependency('libdpdk')
@@ -52,7 +57,7 @@ vulkan = dependency('vulkan')
 
 executable(
   'packet-processor',
-  sources,
+  c_sources + cpp_sources,
   include_directories: inc,
   dependencies: [threads, dpdk, vulkan],
   install: true,

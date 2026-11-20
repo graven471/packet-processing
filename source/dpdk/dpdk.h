@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef enum : uint64_t {
@@ -32,3 +36,7 @@ struct dpdk_port_config {
 
 [[nodiscard("eal initialization may fail"), gnu::cold]] int init_eal(int argc, char **argv);
 [[nodiscard("configuration may fail"), gnu::cold]] int configure_port(struct dpdk_port_config *_Nonnull config);
+
+#ifdef __cplusplus
+}
+#endif
