@@ -15,14 +15,22 @@ extern "C" {
 		}                                           \
 	} while (0)
 
+constexpr size_t MAX_BOUND_MEMORY = 40;
+constexpr size_t VK_MAX_BOUND_MEMORY = 64;
+
 struct vk_context {
 	VkInstance instance;
 	VkPhysicalDevice gpu;
+#ifdef DEBUG_BUILD
+	VkDebugUtilsMessengerEXT dbg_messenger;
+#endif
 	VkDevice device;
 	VkQueue graphics_queue;
 	VkQueue decode_queue;
 	VkVideoSessionKHR video_session;
 	bool shared;
+	uint32_t memory_bound_size;
+	VkDeviceMemory memory_bound[VK_MAX_BOUND_MEMORY];
 };
 
 struct vk_context *vk_context_init();

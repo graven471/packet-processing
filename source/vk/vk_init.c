@@ -186,7 +186,7 @@ debug_utils_callback([[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT msg
 	return false;
 }
 
-[[clang::internal_linkage]] static inline void setup_debug_messenger(VkInstance instance)
+[[clang::internal_linkage]] static inline VkDebugUtilsMessengerEXT setup_debug_messenger(VkInstance instance)
 {
 	VkDebugUtilsMessengerCreateInfoEXT create_info = {
 		.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -201,6 +201,7 @@ debug_utils_callback([[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT msg
 
 	VkDebugUtilsMessengerEXT messenger = {};
 	VK_CHECK(vkCreateDebugUtilsMessengerEXT(instance, &create_info, nullptr, &messenger));
+	return messenger;
 }
 
 struct vk_context *vk_context_init()
@@ -258,7 +259,11 @@ struct vk_context *vk_context_init()
 	VkInstance instance = self->instance;
 	volkLoadInstance(instance);
 
-	setup_debug_messenger(instance);
+#ifdef DEBUG_BUILD
+	self->dbg_messenger = setup_debug_messenger(instance);
+#elif
+	self->dbg_messenger = VK_NULL_HANDLE;
+#endif
 
 	uint32_t physical_device_count = 0;
 	VK_CHECK(vkEnumeratePhysicalDevices(instance, &physical_device_count, nullptr));
@@ -374,26 +379,77 @@ struct vk_context *vk_context_init()
 
 	VK_CHECK(vkCreateVideoSessionKHR(self->device, &session_create_info, nullptr, &self->video_session));
 
-	uint32_t req_counts = 0;
-	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &req_counts, nullptr));
+	uint32_t video_session_mem_req_count = 0;
+	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &video_session_mem_req_count,
+							nullptr));
 
-	VkVideoSessionMemoryRequirementsKHR mem_requirements[req_counts];
+	VkVideoSessionMemoryRequirementsKHR mem_requirements[video_session_mem_req_count];
 	memset(mem_requirements, 0, sizeof(mem_requirements));
 
-	for (uint32_t i = 0; i < req_counts; ++i)
+	for (uint32_t i = 0; i < video_session_mem_req_count; ++i)
 		mem_requirements[i].sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR;
 
-	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &req_counts,
+	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &video_session_mem_req_count,
 							mem_requirements));
 
-	// now for each of req_counts allocate a compatible VkDeviceMemory and bind it using VkBindVideoSessionMemoryInfoKHR
+	VkBindVideoSessionMemoryInfoKHR decode_session_bind_memory[MAX_BOUND_MEMORY];
+	for (uint32_t mem_idx = 0; mem_idx < video_session_mem_req_count; ++mem_idx) {
+		uint32_t memory_type_index = 0;
+		uint32_t mem_type_bits = mem_requirements[mem_idx].memoryRequirements.memoryTypeBits;
 
-	for (uint32_t req = 0; req < req_counts; ++req) {
-		printf("bind_index = %u, alignment = %lu, size = %lu, memory_type = %d\n",
-		       mem_requirements[req].memoryBindIndex, mem_requirements[req].memoryRequirements.alignment,
-		       mem_requirements[req].memoryRequirements.size,
-		       mem_requirements[req].memoryRequirements.memoryTypeBits);
+		for (; !(mem_type_bits & 1); memory_type_index++)
+			mem_type_bits >>= 1;
+
+		VkMemoryAllocateInfo mem_info = {
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.allocationSize = mem_requirements[mem_idx].memoryRequirements.size,
+			.memoryTypeIndex = memory_type_index,
+		};
+
+		VK_CHECK(vkAllocateMemory(self->device, &mem_info, nullptr, &self->memory_bound[mem_idx]));
+
+		decode_session_bind_memory[mem_idx].sType = VK_STRUCTURE_TYPE_BIND_VIDEO_SESSION_MEMORY_INFO_KHR;
+		decode_session_bind_memory[mem_idx].memory = self->memory_bound[mem_idx];
+		decode_session_bind_memory[mem_idx].memorySize = mem_requirements[mem_idx].memoryRequirements.size;
+		decode_session_bind_memory[mem_idx].memoryOffset = 0;
+		decode_session_bind_memory[mem_idx].memoryBindIndex = mem_requirements[mem_idx].memoryBindIndex;
+		decode_session_bind_memory[mem_idx].pNext = NULL;
 	}
 
+	VK_CHECK(vkBindVideoSessionMemoryKHR(self->device, self->video_session, video_session_mem_req_count,
+					     decode_session_bind_memory));
+
+	self->memory_bound_size = video_session_mem_req_count;
+
 	return self;
+}
+
+void vk_context_destroy(struct vk_context *context)
+{
+	if (context->video_session != VK_NULL_HANDLE) {
+		vkDestroyVideoSessionKHR(context->device, context->video_session, nullptr);
+		context->video_session = VK_NULL_HANDLE;
+	}
+
+	for (uint32_t i = 0; i < context->memory_bound_size; ++i) {
+		vkFreeMemory(context->device, context->memory_bound[i], nullptr);
+		context->memory_bound[i] = VK_NULL_HANDLE;
+	}
+
+	if (context->device != VK_NULL_HANDLE) {
+		vkDestroyDevice(context->device, nullptr);
+		context->device = VK_NULL_HANDLE;
+	}
+
+#ifdef DEBUG_BUILD
+	vkDestroyDebugUtilsMessengerEXT(context->instance, context->dbg_messenger, nullptr);
+	context->dbg_messenger = VK_NULL_HANDLE;
+#endif
+
+	if (context->instance != VK_NULL_HANDLE) {
+		vkDestroyInstance(context->instance, nullptr);
+		context->instance = VK_NULL_HANDLE;
+	}
+
+	volkFinalize();
 }

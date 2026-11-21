@@ -84,19 +84,19 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	pthread_t ring_thread;
-	pthread_create(&ring_thread, NULL, producer, ring);
-	pthread_join(ring_thread, NULL);
-
-	struct User *user = (struct User *)ring->data;
-	user[write_index(ring)] = (struct User){ .name = "simple", .age = 21 };
-	ring_commit_write(ring);
-
-	struct User *data = &user[read_index(ring)];
-	printf("name = \t %s, age = \t %d \n", data->name, data->age);
-	ring_commit_read(ring);
-
-	ring_free(ring);
+	// 	pthread_t ring_thread;
+	// 	pthread_create(&ring_thread, NULL, producer, ring);
+	// 	pthread_join(ring_thread, NULL);
+	//
+	// 	struct User *user = (struct User *)ring->data;
+	// 	user[write_index(ring)] = (struct User){ .name = "simple", .age = 21 };
+	// 	ring_commit_write(ring);
+	//
+	// 	struct User *data = &user[read_index(ring)];
+	// 	printf("name = \t %s, age = \t %d \n", data->name, data->age);
+	// 	ring_commit_read(ring);
+	//
+	// 	ring_free(ring);
 
 	struct sz_arena *arena = arena_init(256, true, true);
 	if (arena == NULL) {
@@ -142,6 +142,7 @@ int main(int argc, char **argv)
 
 	// =================== init vulkan video ===================
 	struct vk_context *vk = vk_context_init();
+
 	if (vk == nullptr) {
 		sz_uring_destroy(uring);
 		return -1;
@@ -238,6 +239,7 @@ int main(int argc, char **argv)
 	}
 
 	rte_mempool_free(rx_pool);
+	vk_context_destroy(vk);
 
 	// (todo): why i am getting seg fault when i call these function
 	// rte_eth_dev_stop(config.port_id);

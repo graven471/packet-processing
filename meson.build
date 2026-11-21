@@ -53,15 +53,13 @@ c_sources = files(
   'source/vk/volk_impl.c',
 )
 
-cpp_sources = files('source/vk/vk_test.cpp')
-
 inc = include_directories('source/')
 dpdk = dependency('libdpdk')
 vulkan = dependency('vulkan')
 
 executable(
   'packet-processor',
-  c_sources + cpp_sources,
+  c_sources,
   include_directories: inc,
   dependencies: [threads, dpdk, vulkan],
   install: true,
