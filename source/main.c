@@ -1,6 +1,7 @@
 #include "allocator/slab.h"
 #include "dpdk/dpdk.h"
 #include "io_uring/ring_init.h"
+#include "rtp/parser.h"
 #include "sz/arena.h"
 #include "sz/ring.h"
 #include "vk/vk_init.h"
@@ -149,7 +150,6 @@ int main(int argc, char **argv)
 	}
 
 	// ================== INIT DPDK ==================
-
 	retval = init_eal(argc, argv);
 	if (retval != 0)
 		rte_exit(EXIT_FAILURE, "Eal Initialization failed: %s\n", rte_strerror(-retval));
@@ -230,8 +230,19 @@ int main(int argc, char **argv)
 			// L4
 			const struct rte_udp_hdr *udp = (struct rte_udp_hdr *)((uint8_t *)ip + ip->ihl * 4);
 
-			rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
-			fflush(stdout);
+			if (rte_be_to_cpu_16(udp->dst_port) != 9000)
+				continue;
+
+			const uint8_t *rtp_data = rte_pktmbuf_mtod(pkt, const uint8_t *) +
+						  sizeof(struct rte_ether_hdr) + ip->ihl * 4 +
+						  sizeof(struct rte_udp_hdr);
+			uint16_t rtp_len = rte_be_to_cpu_16(udp->dgram_len) - sizeof(struct rte_udp_hdr);
+
+			if (!rtp_parse(rtp_data, (size_t)rtp_len))
+				continue;
+
+			// rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
+			// fflush(stdout);
 
 			// (todo): do not free in hot path free later
 			rte_pktmbuf_free(rx_pkts[i]);

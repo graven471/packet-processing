@@ -45,6 +45,7 @@ c_sources = files(
   'source/io_uring/ring_init.c',
   'source/io_uring/ring_ops.c',
   'source/main.c',
+  'source/rtp/parser.c',
   'source/sz/arena.c',
   'source/sz/freelist.c',
   'source/sz/list.c',

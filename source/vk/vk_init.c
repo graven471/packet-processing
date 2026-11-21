@@ -392,6 +392,7 @@ struct vk_context *vk_context_init()
 	VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device, self->video_session, &video_session_mem_req_count,
 							mem_requirements));
 
+	//======================= bind memory for session =====================
 	VkBindVideoSessionMemoryInfoKHR decode_session_bind_memory[MAX_BOUND_MEMORY];
 	for (uint32_t mem_idx = 0; mem_idx < video_session_mem_req_count; ++mem_idx) {
 		uint32_t memory_type_index = 0;
