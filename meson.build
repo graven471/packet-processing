@@ -42,6 +42,7 @@ threads = dependency('threads')
 c_sources = files(
   'source/allocator/slab.c',
   'source/dpdk/dpdk.c',
+  'source/h264/nal.c',
   'source/io_uring/ring_init.c',
   'source/io_uring/ring_ops.c',
   'source/main.c',

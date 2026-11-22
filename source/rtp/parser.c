@@ -1,17 +1,21 @@
 #include "parser.h"
+
 #include <endian.h>
+#include <stdint.h>
 #include <stdio.h>
 
+#include "sz/span.h"
+
 // definition:
-// RTP (Real-time Transport Protocol) is a protocol used to deliver audio and video over IP networks.
-//  It doesn't guarantee delivery or timing it just packages the data so it can be played back correctly at the receiver.
+// RTP (Real-time Transport Protocol) is a protocol used to deliver audio and video over IP
+// networks.
+//  It doesn't guarantee delivery or timing it just packages the data so it can be played back
+//  correctly at the receiver.
 
-bool rtp_parse(const uint8_t *_Nonnull rtp_buf, size_t len)
-
-{
-	// [RTP header 12 bytes] [RTP payload]
-	/*
-	   0                   1                   2                   3
+rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
+    // [RTP header 12 bytes] [RTP payload]
+    /*
+       0                   1                   2                   3
        0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
       |V=2|P|X|  CC   |M|     PT      |       sequence number         |
@@ -24,92 +28,56 @@ bool rtp_parse(const uint8_t *_Nonnull rtp_buf, size_t len)
       |                             ....                              |
       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
       RTP header according to RFC 3550
-      V = 2 means version 2
+     */
 
-      Marker bit (M) : 1 bit
-          Set for the very last packet of the access unit indicated by the
-          RTP timestamp Decoders MAY use this bit as an early indication of the last packet of an access unit but MUST
-          NOT rely on this property.
+    if (rtp.len < RTP_HDR_LEN)
+        return RTP_PARSE_TRUNCATED;
 
-      Payload type (PT): 7 bits
-           96 for H264
+    sz_span rtp_hdr = sz_span_subspan(rtp, 0, RTP_HDR_LEN);
 
-      Sequence number (SN): 16 bits
-          For the single NALU and non-interleaved packetization mode, the sequence number is used to
-          determine decoding order for the NALU.
+    if (((*sz_span_first(rtp_hdr) >> 6) & 0x03) != 2)
+        return RTP_PARSE_INVALID_VERSION;
 
-      Timestamp: 32 bits
-            The RTP timestamp is set to the sampling timestamp of the content.
-            A 90 kHz clock rate MUST be used.
-	 */
+    uint8_t p = (*sz_span_first(rtp_hdr) >> 5) & 0x01;
+    uint8_t x = (*sz_span_first(rtp_hdr) >> 4) & 0x01;
+    uint8_t cc = *sz_span_first(rtp_hdr) & 0x0F;
 
-	// todo: handle error
+    uint8_t m = (*sz_span_at(rtp_hdr, 1) >> 7) & 0x01;
+    uint8_t pt = *sz_span_at(rtp_hdr, 1) & 0x7F;
 
-	if (len < RTP_HDR_LEN)
-		return false;
+    uint16_t seq_num = be16toh(*(uint16_t *)(sz_span_at(rtp_hdr, 2)));
+    uint32_t timestamp = be32toh(*(uint32_t *)(sz_span_at(rtp_hdr, 4)));
+    uint32_t ssrc = be32toh(*(uint32_t *)(sz_span_at(rtp_hdr, 8)));
 
-	const uint8_t *rtp_hdr = rtp_buf;
+    // each `cc` entries occupies 4-byte
+    size_t offset = RTP_HDR_LEN + (cc * 4);
 
-	if (((rtp_hdr[0] >> 6) & 0x03) != 2)
-		return false;
+    if (x) [[clang::unlikely]] {
+        uint16_t ext_len =
+            ((uint16_t)rtp_hdr.ptr[offset + 2] << 8) | ((uint16_t)rtp_hdr.ptr[offset + 3]);
+        offset += 4 + (ext_len * 4);
+    }
 
-	uint8_t p = (rtp_hdr[0] >> 5) & 0x01;
-	uint8_t x = (rtp_hdr[0] >> 4) & 0x01;
-	uint8_t cc = rtp_hdr[0] & 0x0F;
+    // nal starts from RTP_HDR_LEN + csrc_size
+    if (sz_span_size(rtp) < offset)
+        return RTP_PARSE_TRUNCATED;
 
-	uint8_t m = (rtp_hdr[1] >> 7) & 0x01;
-	uint8_t pt = rtp_hdr[1] & 0x7F;
+    size_t payload_len = sz_span_size(rtp) - offset;
 
-	printf("PT = (%u)\n", pt);
+    if (p) {
+        const uint8_t padding_len = *sz_span_last(rtp);
+        payload_len -= padding_len;
+    }
 
-	// 96 = H264
-	// (todo): do not do this let this parser be generic and handle this into H264 code
-	if (pt != RTP_PT_H264)
-		return false;
+    sz_span rtp_payload = sz_span_subspan(rtp, offset, payload_len);
 
-	uint16_t seq_num = be16toh(*(uint16_t *)(rtp_hdr + 2));
-	uint32_t timestamp = be32toh(*(uint32_t *)(rtp_hdr + 4));
-	uint32_t ssrc = be32toh(*(uint32_t *)(rtp_hdr + 8));
+    out->cc = cc;
+    out->ssrc = ssrc;
+    out->marker = m;
+    out->payload_type = pt;
+    out->sequence_number = seq_num;
+    out->timestamp = timestamp;
+    out->payload = rtp_payload;
 
-	uint32_t csrc_size = cc * 4;
-
-	// nal starts from RTP_HDR_LEN + csrc_size
-	if (len < RTP_HDR_LEN + csrc_size)
-		return false;
-
-	// (fixme): if x = 1 then there is a extension length i have to skip that
-	const uint8_t *rtp_payload = &rtp_buf[RTP_HDR_LEN + csrc_size];
-
-	/*
-	 0                   1                   2                   3
-     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |F|NRI|  Type   |                                               |
-    +-+-+-+-+-+-+-+-+                                               |
-    |                                                               |
-    |               Bytes 2..n of a single NAL unit                 |
-    |                                                               |
-    |                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                               :...OPTIONAL RTP padding        |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    Figure 2.  RTP payload format for single NAL unit packet
-    RFC 6184 section 5.6
-   */
-
-	const uint8_t nal = rtp_payload[0];
-	// this is forbidden bit must be 0
-	if (((nal >> 7) & 0x01) != 0)
-		return false;
-
-	// nal_ref_idc tells how important nal is for reference
-	// the NRI value of non-reference pictures is 00 as mandated by H.264.
-	const uint8_t nri = (nal >> 5) & 0x3;
-
-	// (rfc): The single NAL unit mode is targeted for conversational systems that comply with ITU-T Recommendation H.241
-	// so nal_unit_type from 1-23 is "single NAL unit mode"
-	// 24 — STAP-A
-	// 28 — FU-A
-	const uint8_t nal_unit_type = nal & 0x1F;
-
-	return true;
+    return RTP_PARSE_OK;
 }

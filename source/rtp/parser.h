@@ -3,7 +3,28 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RTP_HDR_LEN 12
-#define RTP_PT_H264 96
+#include "sz/span.h"
 
-bool rtp_parse(const uint8_t *_Nonnull rtp_buf, size_t len);
+#define RTP_HDR_LEN 12
+
+typedef enum {
+    RTP_PARSE_OK = 0,
+    RTP_PARSE_INVALID_ARGUMENT,
+    RTP_PARSE_TRUNCATED,
+    RTP_PARSE_INVALID_VERSION,
+    RTP_PARSE_INVALID_HEADER,
+    RTP_PARSE_INVALID_EXTENSION,
+    RTP_PARSE_INVALID_PADDING,
+} rtp_parse_result;
+
+struct rtp_packet {
+    uint8_t cc;
+    bool marker;
+    uint8_t payload_type;
+    uint16_t sequence_number;
+    uint32_t timestamp;
+    uint32_t ssrc;
+    sz_span payload;
+};
+
+rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out);
