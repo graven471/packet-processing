@@ -35,16 +35,6 @@ struct gpu_candidate {
     (sizeof(struct { int : -!!__builtin_types_compatible_p(typeof(arr), typeof(&(arr)[0])); })     \
      + sizeof(arr) / sizeof((arr)[0]))
 
-/*
- * i have n gpu(s) and i am looping over each of them ok and finding its props extensions etc
- * now what i have to do is that prefer dedicated gpu and device which has more features
- * let gpu = gpus[idx], where idx = number of supported vulkan gpu(s) in machine
- * now check this gpu supported features, type and extensions increment score if features i need is
- * present set candiates = gpu, then i have two scores, for examples let's say gpu[0].score = 500,
- * and gpu[1].score = 800 now i select one of the GPU based on the highest so ofcourse it will be
- * gpu[1]
- */
-
 [[clang::internal_linkage]] [[gnu::nonnull]] static struct gpu_candidate
 select_preferred_gpu(VkPhysicalDevice *gpus, uint32_t gpu_count) {
     struct gpu_candidate candiates[gpu_count];
