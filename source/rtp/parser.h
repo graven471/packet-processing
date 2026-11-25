@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "rtp/serial_number.h"
 #include "sz/span.h"
 
 #define RTP_HDR_LEN 12
@@ -21,7 +22,7 @@ struct rtp_packet {
     uint8_t cc;
     bool marker;
     uint8_t payload_type;
-    uint16_t sequence_number;
+    seq_num sequence_number;
     uint32_t timestamp;
     uint32_t ssrc;
     sz_span payload;

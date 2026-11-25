@@ -3,8 +3,16 @@
 #include <endian.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
+#include "rtp/serial_number.h"
 #include "sz/span.h"
+
+static inline uint32_t read_u32be(const void *p) {
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    return be32toh(v);
+}
 
 // definition:
 // RTP (Real-time Transport Protocol) is a protocol used to deliver audio and video over IP
@@ -45,9 +53,12 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     uint8_t m = (*sz_span_at(rtp_hdr, 1) >> 7) & 0x01;
     uint8_t pt = *sz_span_at(rtp_hdr, 1) & 0x7F;
 
-    uint16_t seq_num = be16toh(*(uint16_t *)(sz_span_at(rtp_hdr, 2)));
-    uint32_t timestamp = be32toh(*(uint32_t *)(sz_span_at(rtp_hdr, 4)));
-    uint32_t ssrc = be32toh(*(uint32_t *)(sz_span_at(rtp_hdr, 8)));
+    uint16_t raw;
+    memcpy(&raw, sz_span_at(rtp_hdr, 2), sizeof(uint16_t));
+    seq_num sn = be16toh(raw);
+
+    uint32_t timestamp = read_u32be(sz_span_at(rtp_hdr, 4));
+    uint32_t ssrc = read_u32be(sz_span_at(rtp_hdr, 8));
 
     // each `cc` entries occupies 4-byte
     size_t offset = RTP_HDR_LEN + (cc * 4);
@@ -75,7 +86,7 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     out->ssrc = ssrc;
     out->marker = m;
     out->payload_type = pt;
-    out->sequence_number = seq_num;
+    out->sequence_number = sn;
     out->timestamp = timestamp;
     out->payload = rtp_payload;
 
