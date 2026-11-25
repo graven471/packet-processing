@@ -35,103 +35,23 @@
 #include <sys/queue.h>
 #include <sys/types.h>
 
-#include "allocator/slab.h"
 #include "dpdk/dpdk.h"
 #include "h264/nal.h"
 #include "io_uring/ring_init.h"
 #include "rtp/parser.h"
 #include "sz/arena.h"
-#include "sz/ring.h"
 #include "sz/span.h"
 #include "vk/vk_init.h"
 
-struct User {
-    const char *name;
-    uint8_t age;
-};
-
-[[maybe_unused]] static inline void *producer(void *arg) {
-    [[maybe_unused]] struct sz_ring *ring = (struct sz_ring *)arg;
-    return NULL;
-}
-
-typedef struct {
-    uint16_t length;
-    uint8_t msg_type;
-    uint32_t timestamp;
-    uint64_t order_ref;
-    char side; // 'B' or 'S'
-    uint32_t shares;
-    char symbol[8];
-    uint32_t price;
-} __attribute__((packed)) itch_add_order_t;
-
-// convert this project into:
-// write arena mmap, pre-fault, huge pages etc
-// write slab so i can allocate itch_add_order_t without fragmentation
-// setup DPDK
-// should i use raw io_uring or liburing (write uring abstraction)
-// validate a packet, do stuffs add to ring buffer, io_uring fetches it writes
-// to disk etc
-// NIC → DPDK rx thread → parse → ring → io_uring thread → disk
-
 int main(int argc, char **argv) {
-    struct sz_ring *ring = ring_init(32);
-
-    if (ring == NULL) {
-        fprintf(stderr, "failed to init ring\n");
-        return -1;
-    }
-
-    // 	pthread_t ring_thread;
-    // 	pthread_create(&ring_thread, NULL, producer, ring);
-    // 	pthread_join(ring_thread, NULL);
-    //
-    // 	struct User *user = (struct User *)ring->data;
-    // 	user[write_index(ring)] = (struct User){ .name = "simple", .age = 21 };
-    // 	ring_commit_write(ring);
-    //
-    // 	struct User *data = &user[read_index(ring)];
-    // 	printf("name = \t %s, age = \t %d \n", data->name, data->age);
-    // 	ring_commit_read(ring);
-    //
-    // 	ring_free(ring);
-
-    struct sz_arena *arena = arena_init(256, true, true);
-    if (arena == NULL) {
-        fprintf(stderr, "arena init failed\n");
-        return -1;
-    }
-
-    arena_destroy(arena);
-
-    struct kmem_cache *cache = kmem_cache_create("itch_order", sizeof(itch_add_order_t));
-    if (!cache) {
-        fprintf(stderr, "failed to create cache");
-        return -1;
-    }
-
-    itch_add_order_t *order = kmem_cache_alloc(cache);
-
-    if (!order) {
-        fprintf(stderr, "kmem alloc failed\n");
-        return -1;
-    }
-
-    printf("addr = %lxlu\n", (uintptr_t)order);
-
-    *order = (itch_add_order_t){.length = 20,
-                                .msg_type = 10,
-                                .side = 'B',
-                                .shares = 30,
-                                .symbol = {0},
-                                .timestamp = 123424};
-
-    printf("%d, %d, %c \n", order->length, order->msg_type, order->side);
-
-    kmem_cache_free(cache, (void *)order);
-
     int retval = 0;
+
+    struct sz_arena_config cfg = {.capacity = 4096, .flags = ARENA_FLAG_NONE, .pre_fault = true};
+    struct sz_arena *arena;
+    retval = sz_arena_init(&cfg, &arena);
+
+    if (retval != 0)
+        return -1;
 
     // ================== INIT Lord of Rings ===========
     struct io_uring_params params = {.flags = IORING_SETUP_SQPOLL, .sq_thread_idle = 500};
@@ -161,7 +81,7 @@ int main(int argc, char **argv) {
                                                           256,
                                                           0,
                                                           RTE_MBUF_DEFAULT_BUF_SIZE,
-                                                          (int)rte_socket_id());
+                                                          rte_socket_id());
 
     if (rx_pool == nullptr)
         rte_exit(EXIT_FAILURE, "failed to create rx pool error: %s\n", rte_strerror(rte_errno));
@@ -207,7 +127,6 @@ int main(int argc, char **argv) {
      * |________________________________________|
      */
     struct rte_mbuf *rx_pkts[nb_pkts];
-
     while (1) {
         uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
         for (uint16_t i = 0; i < nb; ++i) {
@@ -216,9 +135,6 @@ int main(int argc, char **argv) {
             // L2
             struct rte_ether_hdr *eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
-            // (todo): if ether type is RTE_ETHER_TYPE_VLAN (0x8100) then there is 4 byte VLAN
-            // inserted before the real ether type in config we have RX_OFFLOAD_VLAN_STRIP so if its
-            // true we can ignore otherwise we have to remove it manually skip non ipv4 header
             if (rte_be_to_cpu_16(eth->ether_type) != RTE_ETHER_TYPE_IPV4) [[clang::unlikely]]
                 continue;
 

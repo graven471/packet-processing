@@ -1,7 +1,6 @@
 #include "slab.h"
 
 #include <assert.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #include "sz/arena.h"
@@ -10,21 +9,23 @@
 [[gnu::cold, nodiscard]] struct kmem_cache *kmem_cache_create(const char *name,
                                                               uint32_t object_size) {
     object_size = NEXT_POW2(object_size);
-    printf("obj size: %d\n", object_size);
 
-    struct sz_arena *arena = arena_init(PAGE_SIZE, false, true);
-    if (!arena) [[clang::unlikely]]
+    struct sz_arena_config cfg = {.capacity = PAGE_SIZE,
+                                  .flags = ARENA_FLAG_NONE,
+                                  .pre_fault = true};
+    struct sz_arena *arena;
+    if (sz_arena_init(&cfg, &arena) != 0)
         return nullptr;
 
     // we want initial n bytes of page to store slab metadata so skip it and align
-    const uintptr_t offset = ((uintptr_t)arena->ptr) + sizeof(struct slab);
+    const uintptr_t offset = ((uintptr_t)arena->storage) + sizeof(struct slab);
     const uintptr_t start = ALIGN_UP(offset, object_size);
 
     const uint64_t slots =
-        ((uintptr_t)arena->ptr + PAGE_SIZE - start) >> __builtin_ctz(object_size);
+        ((uintptr_t)arena->storage + PAGE_SIZE - start) >> __builtin_ctz(object_size);
     assert(slots > 0 && "slots can not be zero");
 
-    struct slab *slab = arena->ptr;
+    struct slab *slab = (struct slab *)arena->storage;
     // since arena_init allocates `arena` on heap we can store it inside slab
     slab->arena = arena;
     slab->slots = (uint32_t)slots;
@@ -67,11 +68,11 @@ kmem_cache_alloc(struct kmem_cache *_Nonnull cache) {
 }
 
 // (todo): build this
-bool kmem_cache_alloc_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **p) {
-    return false;
-}
-
-void kmem_cache_free_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **_Nonnull p) {}
+// bool kmem_cache_alloc_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **p) {
+//     return false;
+// }
+//
+// void kmem_cache_free_bulk(struct kmem_cache *_Nonnull cache, size_t size, void **_Nonnull p) {}
 
 void kmem_cache_free(struct kmem_cache *_Nonnull cache, void *_Nonnull obj) {
     struct slab *slab;

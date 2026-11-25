@@ -103,9 +103,12 @@ get_nal_type(uint8_t nal) {
 
 [[clang::internal_linkage]] static void handle_nal_stap_a(sz_span rtp_payload) {}
 
+// (todo): let this just do parsing and return header and other useful utilities then
+// another layer will do remaining work like identifying nal running logic for
+// different nal etc
 void h264_nal_parse(struct rtp_packet *_Nonnull packet) {
     // 96 = H264
-    if (packet->payload_type != RTP_PT_H264)
+    if (packet->payload_type != RTP_PT_H264) [[clang::unlikely]]
         return;
 
     sz_span payload = packet->payload;
