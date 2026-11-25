@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "rtp/serial_number.h"
+#include "sz/macros.h"
 #include "sz/span.h"
 
 static inline uint32_t read_u32be(const void *p) {
@@ -48,22 +48,22 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
 
     uint8_t p = (*sz_span_first(rtp_hdr) >> 5) & 0x01;
     uint8_t x = (*sz_span_first(rtp_hdr) >> 4) & 0x01;
-    uint8_t cc = *sz_span_first(rtp_hdr) & 0x0F;
+    out->cc = *sz_span_first(rtp_hdr) & 0x0F;
 
-    uint8_t m = (*sz_span_at(rtp_hdr, 1) >> 7) & 0x01;
-    uint8_t pt = *sz_span_at(rtp_hdr, 1) & 0x7F;
+    out->marker = (*sz_span_at(rtp_hdr, 1) >> 7) & 0x01;
+    out->payload_type = *sz_span_at(rtp_hdr, 1) & 0x7F;
 
     uint16_t raw;
     memcpy(&raw, sz_span_at(rtp_hdr, 2), sizeof(uint16_t));
-    seq_num sn = be16toh(raw);
+    out->sequence_number = be16toh(raw);
 
-    uint32_t timestamp = read_u32be(sz_span_at(rtp_hdr, 4));
-    uint32_t ssrc = read_u32be(sz_span_at(rtp_hdr, 8));
+    out->timestamp = read_u32be(sz_span_at(rtp_hdr, 4));
+    out->ssrc = read_u32be(sz_span_at(rtp_hdr, 8));
 
     // each `cc` entries occupies 4-byte
-    size_t offset = RTP_HDR_LEN + (cc * 4);
+    size_t offset = RTP_HDR_LEN + (out->cc * 4);
 
-    if (x) [[clang::unlikely]] {
+    if (UNLIKELY(x)) {
         uint16_t ext_len =
             ((uint16_t)rtp_hdr.ptr[offset + 2] << 8) | ((uint16_t)rtp_hdr.ptr[offset + 3]);
         offset += 4 + (ext_len * 4);
@@ -80,15 +80,7 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
         payload_len -= padding_len;
     }
 
-    sz_span rtp_payload = sz_span_subspan(rtp, offset, payload_len);
-
-    out->cc = cc;
-    out->ssrc = ssrc;
-    out->marker = m;
-    out->payload_type = pt;
-    out->sequence_number = sn;
-    out->timestamp = timestamp;
-    out->payload = rtp_payload;
+    out->payload = sz_span_subspan(rtp, offset, payload_len);
 
     return RTP_PARSE_OK;
 }

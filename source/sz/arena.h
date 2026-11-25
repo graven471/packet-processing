@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+#include "sz/macros.h"
+
 enum { ARENA_FLAG_NONE = 0, ARENA_FLAG_HUGE_PAGES = 1 << 1 };
 
 struct sz_arena_config {
@@ -57,11 +59,11 @@ static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_are
 
 static inline uint8_t *sz_arena_alloc_aligned(struct sz_arena *self, size_t n, size_t alignment) {
     assert((alignment & (alignment - 1)) == 0);
-    if (n > self->capacity)
+    if (UNLIKELY(n > self->capacity))
         return nullptr;
     // assume storage = 0x1000 and offset = 8 i.e. we allocated first 8-bytes already
     // then address = 0x1000 + 8 = 0x1008
-    uintptr_t address = (uintptr_t)(self->storage + self->offset);
+    const uintptr_t address = (uintptr_t)(self->storage + self->offset);
     // how may bytes to skip to find suitable starting address
     const uintptr_t padding = (-address) & (alignment - 1);
     const uintptr_t aligned_offset = self->offset + padding;

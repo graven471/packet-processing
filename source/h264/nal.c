@@ -1,5 +1,6 @@
 #include "nal.h"
 
+#include "sz/macros.h"
 #include "sz/span.h"
 
 typedef enum {
@@ -108,14 +109,14 @@ get_nal_type(uint8_t nal) {
 // different nal etc
 void h264_nal_parse(struct rtp_packet *_Nonnull packet) {
     // 96 = H264
-    if (packet->payload_type != RTP_PT_H264) [[clang::unlikely]]
+    if (UNLIKELY((packet->payload_type != RTP_PT_H264)))
         return;
 
     sz_span payload = packet->payload;
 
     const uint8_t nal = *sz_span_first(payload);
     // this is forbidden bit must be 0
-    if (((nal >> 7) & 0x01) != 0)
+    if (UNLIKELY(((nal >> 7) & 0x01) != 0))
         return;
 
     // nal_ref_idc tells how important nal is for reference

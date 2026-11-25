@@ -1,6 +1,5 @@
 #include <assert.h>
 #include <fcntl.h>
-#include <iso646.h>
 #include <pthread.h>
 #include <rte_build_config.h>
 #include <rte_byteorder.h>
@@ -156,7 +155,7 @@ int main(int argc, char **argv) {
             const uint8_t *rtp_data = rte_pktmbuf_mtod(pkt, const uint8_t *)
                                       + sizeof(struct rte_ether_hdr) + ip->ihl * 4
                                       + sizeof(struct rte_udp_hdr);
-            uint16_t rtp_len = rte_be_to_cpu_16(udp->dgram_len) - sizeof(struct rte_udp_hdr);
+            const uint16_t rtp_len = rte_be_to_cpu_16(udp->dgram_len) - sizeof(struct rte_udp_hdr);
 
             sz_span rtp_span = sz_span_make(rtp_data, rtp_len);
 
