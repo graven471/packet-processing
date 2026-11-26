@@ -27,7 +27,7 @@ struct sz_arena {
     size_t offset;
 };
 
-static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_arena **out) {
+static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_arena *out) {
     if (cfg == nullptr || out == nullptr || cfg->capacity == 0)
         return -EINVAL;
 
@@ -48,9 +48,9 @@ static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_are
             return -errno;
     }
 
-    (*out)->storage = (uint8_t *)storage;
-    (*out)->offset = 0;
-    (*out)->capacity = cfg->capacity;
+    out->storage = (uint8_t *)storage;
+    out->offset = 0;
+    out->capacity = cfg->capacity;
 
     return 0;
 }

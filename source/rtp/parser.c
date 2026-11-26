@@ -14,6 +14,12 @@ static inline uint32_t read_u32be(const void *p) {
     return be32toh(v);
 }
 
+static inline uint16_t read_u16be(const void *p) {
+    uint16_t v;
+    memcpy(&v, p, sizeof(v));
+    return be16toh(v);
+}
+
 // definition:
 // RTP (Real-time Transport Protocol) is a protocol used to deliver audio and video over IP
 // networks.
@@ -64,9 +70,18 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     size_t offset = RTP_HDR_LEN + (out->cc * 4);
 
     if (UNLIKELY(x)) {
-        uint16_t ext_len =
-            ((uint16_t)rtp_hdr.ptr[offset + 2] << 8) | ((uint16_t)rtp_hdr.ptr[offset + 3]);
-        offset += 4 + (ext_len * 4);
+        if (rtp.len - offset < 4)
+            return RTP_PARSE_TRUNCATED;
+
+        // Extension length is in 32-bit words.
+        uint16_t ext_len = read_u16be(rtp.ptr + offset + 2);
+
+        size_t ext_size = 4 + (size_t)ext_len * 4;
+
+        if (ext_size > rtp.len - offset)
+            return RTP_PARSE_TRUNCATED;
+
+        offset += ext_size;
     }
 
     // nal starts from RTP_HDR_LEN + csrc_size
@@ -76,11 +91,17 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     size_t payload_len = sz_span_size(rtp) - offset;
 
     if (p) {
+        if (payload_len == 0)
+            return RTP_PARSE_INVALID_PADDING;
+
         const uint8_t padding_len = *sz_span_last(rtp);
         payload_len -= padding_len;
     }
 
     out->payload = sz_span_subspan(rtp, offset, payload_len);
+
+    if (sz_span_dangling(out->payload))
+        return RTP_PARSE_TRUNCATED; /* (todo): change error code */
 
     return RTP_PARSE_OK;
 }

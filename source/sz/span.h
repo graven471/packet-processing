@@ -17,13 +17,17 @@ typedef struct {
     return self.len == 0;
 }
 
+[[clang::always_inline, gnu::const]] bool static inline sz_span_dangling(sz_span self) {
+    return self.ptr == nullptr;
+}
+
 [[clang::always_inline, gnu::const]] size_t static inline sz_span_size(sz_span self) {
     return self.len;
 }
 
 [[clang::always_inline, gnu::const,
   nodiscard]] sz_span static inline sz_span_subspan(sz_span self, size_t offset, size_t len) {
-    if (offset + len >= self.len)
+    if (offset > self.len || len > self.len - offset)
         return sz_span_make(nullptr, 0);
     return (sz_span){.ptr = self.ptr + offset, .len = len};
 }

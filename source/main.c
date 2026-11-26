@@ -35,18 +35,25 @@
 #include <sys/types.h>
 
 #include "dpdk/dpdk.h"
-#include "h264/nal.h"
+#include "h264/h264.h"
 #include "io_uring/ring_init.h"
 #include "rtp/parser.h"
+#include "rtp/serial_number.h"
 #include "sz/arena.h"
+#include "sz/macros.h"
 #include "sz/span.h"
 #include "vk/vk_init.h"
+
+typedef struct {
+    seq_num prev_seq_num;
+    seq_num expected;
+} out_of_order_t;
 
 int main(int argc, char **argv) {
     int retval = 0;
 
     struct sz_arena_config cfg = {.capacity = 4096, .flags = ARENA_FLAG_NONE, .pre_fault = true};
-    struct sz_arena *arena;
+    struct sz_arena arena;
     retval = sz_arena_init(&cfg, &arena);
 
     if (retval != 0)
@@ -125,7 +132,12 @@ int main(int argc, char **argv) {
      * |           payload n bytes              |
      * |________________________________________|
      */
+
+    out_of_order_t out_of_order_test = {0};
+
     struct rte_mbuf *rx_pkts[nb_pkts];
+    bool b_is_initialized = false;
+
     while (1) {
         uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
         for (uint16_t i = 0; i < nb; ++i) {
@@ -134,7 +146,7 @@ int main(int argc, char **argv) {
             // L2
             struct rte_ether_hdr *eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
-            if (rte_be_to_cpu_16(eth->ether_type) != RTE_ETHER_TYPE_IPV4) [[clang::unlikely]]
+            if (UNLIKELY(rte_be_to_cpu_16(eth->ether_type) != RTE_ETHER_TYPE_IPV4))
                 continue;
 
             // rte_ether_hdr is always 14 bytes fixed
@@ -159,17 +171,35 @@ int main(int argc, char **argv) {
 
             sz_span rtp_span = sz_span_make(rtp_data, rtp_len);
 
-            struct rtp_packet rtp_pkt = {0};
-            if (rtp_parse(rtp_span, &rtp_pkt) != RTP_PARSE_OK)
+            struct rtp_packet rtp_pkt;
+            if (UNLIKELY(rtp_parse(rtp_span, &rtp_pkt) != RTP_PARSE_OK))
                 continue;
 
+            if (UNLIKELY(b_is_initialized && rtp_pkt.sequence_number != out_of_order_test.expected))
+                // handle OoD
+                printf("missing packet prev = %u, expected = %u, got = %u\n",
+                       out_of_order_test.prev_seq_num,
+                       out_of_order_test.expected,
+                       rtp_pkt.sequence_number);
+
+            // (todo): h264_parse_nal()
+
             // wip
-            h264_nal_parse(&rtp_pkt);
+            h264_frame_t h264_frame;
+            if (h264_get_frame(&rtp_pkt, &h264_frame) != SZ_H264_OK)
+                continue;
+
+            printf("current offset = %lu\n", sz_arena_pos(&h264_frame.arena));
+
+            if (!b_is_initialized)
+                b_is_initialized = true;
+
+            out_of_order_test.prev_seq_num = rtp_pkt.sequence_number;
+            seq_add(out_of_order_test.prev_seq_num, 1, &out_of_order_test.expected);
 
             // rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
             // fflush(stdout);
 
-            // (todo): do not free in hot path free later
             rte_pktmbuf_free(rx_pkts[i]);
         }
     }

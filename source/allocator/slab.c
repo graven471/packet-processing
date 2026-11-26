@@ -13,21 +13,21 @@
     struct sz_arena_config cfg = {.capacity = PAGE_SIZE,
                                   .flags = ARENA_FLAG_NONE,
                                   .pre_fault = true};
-    struct sz_arena *arena;
+    struct sz_arena arena;
     if (sz_arena_init(&cfg, &arena) != 0)
         return nullptr;
 
     // we want initial n bytes of page to store slab metadata so skip it and align
-    const uintptr_t offset = ((uintptr_t)arena->storage) + sizeof(struct slab);
+    const uintptr_t offset = ((uintptr_t)arena.storage) + sizeof(struct slab);
     const uintptr_t start = ALIGN_UP(offset, object_size);
 
     const uint64_t slots =
-        ((uintptr_t)arena->storage + PAGE_SIZE - start) >> __builtin_ctz(object_size);
+        ((uintptr_t)arena.storage + PAGE_SIZE - start) >> __builtin_ctz(object_size);
     assert(slots > 0 && "slots can not be zero");
 
-    struct slab *slab = (struct slab *)arena->storage;
-    // since arena_init allocates `arena` on heap we can store it inside slab
-    slab->arena = arena;
+    struct slab *slab = (struct slab *)arena.storage;
+    // (fixme): [critical] arena is local we are storing reference of local variable
+    slab->arena = &arena;
     slab->slots = (uint32_t)slots;
     slab->free_count = (uint32_t)slots;
     slab->state = Free;

@@ -1,5 +1,11 @@
-#include "nal.h"
+#include "h264.h"
 
+#include <rte_memcpy.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include "rtp/parser.h"
+#include "sz/arena.h"
 #include "sz/macros.h"
 #include "sz/span.h"
 
@@ -20,12 +26,24 @@ static const nal_unit_type_t nal_type_table[32] = {
     [30 ... 31] = NAL_UNDEFINED,
 };
 
+// (todo): learn about this
+typedef enum {
+    H264_NAL_UNSPECIFIED = 0,
+    H264_NAL_SLICE = 1,
+    H264_NAL_IDR = 5,
+    H264_NAL_SEI = 6,
+    H264_NAL_SPS = 7,
+    H264_NAL_PPS = 8,
+    H264_NAL_AUD = 9,
+} h264_nal_content_type_t;
+
 [[clang::internal_linkage, clang::always_inline]] static inline nal_unit_type_t
 get_nal_type(uint8_t nal) {
     return nal_type_table[nal & 0x1F];
 }
 
-[[clang::internal_linkage]] static void handle_nal_single(sz_span rtp_payload) {
+[[clang::internal_linkage]] static void handle_nal_single(sz_span rtp_payload,
+                                                          h264_frame_t *out_frame) {
     /*
      0                   1                   2                   3
      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -41,6 +59,11 @@ get_nal_type(uint8_t nal) {
     Figure 2.  RTP payload format for single NAL unit packet
     RFC 6184 section 5.6
    */
+
+    uint8_t *ptr = sz_arena_alloc(&out_frame->arena, rtp_payload.len);
+    if (!ptr)
+        return;
+    rte_memcpy(ptr, rtp_payload.ptr, rtp_payload.len);
 }
 
 [[clang::internal_linkage]] static void handle_nal_fu_a(sz_span rtp_payload) {
@@ -102,48 +125,60 @@ get_nal_type(uint8_t nal) {
     // start = 0, end = 1 -> end of fragment packet
 }
 
-[[clang::internal_linkage]] static void handle_nal_stap_a(sz_span rtp_payload) {}
+h264_result h264_init(struct h264_context *context) {
+    return SZ_H264_OK;
+}
 
-// (todo): let this just do parsing and return header and other useful utilities then
-// another layer will do remaining work like identifying nal running logic for
-// different nal etc
-void h264_nal_parse(struct rtp_packet *_Nonnull packet) {
+h264_result h264_get_frame(const struct rtp_packet *_Nonnull packet, h264_frame_t *frame) {
     // 96 = H264
     if (UNLIKELY((packet->payload_type != RTP_PT_H264)))
-        return;
+        return SZ_H264_INTERNAL_ERROR;
 
     sz_span payload = packet->payload;
+
+    printf("seq=%u timestamp=%u marker=%u nal_type=%u\n",
+           packet->sequence_number,
+           packet->timestamp,
+           packet->marker,
+           packet->payload.ptr[0] & 0x1F);
 
     const uint8_t nal = *sz_span_first(payload);
     // this is forbidden bit must be 0
     if (UNLIKELY(((nal >> 7) & 0x01) != 0))
-        return;
+        return SZ_H264_INTERNAL_ERROR;
 
-    // nal_ref_idc tells how important nal is for reference
-    // the NRI value of non-reference pictures is 00 as mandated by H.264.
-    // const uint8_t nri = (nal >> 5) & 0x3;
-
-    // (rfc): The single NAL unit mode is targeted for conversational systems that comply with ITU-T
-    // Recommendation H.241 so nal_unit_type from 1-23 is "single NAL unit mode" 24 — STAP-A 28 —
-    // FU-A
+    const uint8_t nri = (nal >> 5) & 0x3;
     const nal_unit_type_t nal_type = get_nal_type(nal);
+
+    struct sz_arena_config arena_cfg = {.capacity = 2097152,
+                                        .pre_fault = true,
+                                        .flags = ARENA_FLAG_HUGE_PAGES};
+
+    // (fixme): recreating arena each time lol
+    if (sz_arena_init(&arena_cfg, &frame->arena) != 0)
+        return SZ_H264_INTERNAL_ERROR;
 
     switch (nal_type) {
     case NAL_TYPE_SINGLE:
-        handle_nal_single(payload);
+        handle_nal_single(payload, frame);
+        if (packet->marker)
+            break;
         break;
 
     // Aggregation Packets
     case NAL_TYPE_STAP_A:
-        handle_nal_stap_a(payload);
-        break;
+        printf("nal stap-a\n");
+        // handle_nal_stap_a(payload);
+        return SZ_H264_NOT_IMPLEMENTED;
 
     case NAL_TYPE_FU_A:
-        handle_nal_fu_a(payload);
-        break;
+        printf("nal fu-a\n");
+        return SZ_H264_NOT_IMPLEMENTED;
 
     case NAL_TYPE_UNKNOWN:
     case NAL_UNDEFINED:
-        break;
+        return SZ_H264_INTERNAL_ERROR;
     }
+
+    return SZ_H264_OK;
 }
