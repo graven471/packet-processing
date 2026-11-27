@@ -161,9 +161,8 @@ h264_result h264_get_frame(const struct rtp_packet *_Nonnull packet, h264_frame_
 
     switch (nal_type) {
     case NAL_TYPE_SINGLE:
-        if ((nal & 0x1f) == H264_NAL_SPS) {
+        if ((nal & 0x1f) == H264_NAL_SPS)
             handle_sps(packet, sz_span_subspan(payload, 1, payload.len - 1), frame);
-        }
 
         if ((nal & 0x1f) == H264_NAL_PPS) {
             // handle pps

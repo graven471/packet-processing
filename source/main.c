@@ -42,6 +42,7 @@
 #include "sz/arena.h"
 #include "sz/macros.h"
 #include "sz/span.h"
+#include "sz/sz_vector.h"
 #include "vk/vk_init.h"
 
 typedef struct {
@@ -110,6 +111,12 @@ int main(int argc, char **argv) {
     h264_frame_t h264_frame = {0};
     if (h264_prepare_for_frame(2097152, &h264_frame) != SZ_H264_OK)
         exit(1);
+
+    sz_vector vec = {0};
+    if (sz_vector_init_with_capacity(sizeof(uint32_t), 256, &vec) != SZ_VECTOR_OK)
+        exit(1);
+
+    sz_vector_deinit(&vec);
 
     constexpr uint16_t nb_pkts = 32;
     /*
