@@ -107,6 +107,10 @@ int main(int argc, char **argv) {
         rte_exit(EXIT_FAILURE, "Port initialization failed: %s\n", rte_strerror(-retval));
     }
 
+    h264_frame_t h264_frame = {0};
+    if (h264_prepare_for_frame(2097152, &h264_frame) != SZ_H264_OK)
+        exit(1);
+
     constexpr uint16_t nb_pkts = 32;
     /*
      * struct rte_mubf is just a metadata actual data lives at rte_mbuf.buf_addr
@@ -137,6 +141,12 @@ int main(int argc, char **argv) {
 
     struct rte_mbuf *rx_pkts[nb_pkts];
     bool b_is_initialized = false;
+
+    /*
+     * what is the problem ?
+     * i need an storage to store the one frame payload
+     * it should not reset until the frame is completed and i used it
+     */
 
     while (1) {
         uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
@@ -182,16 +192,19 @@ int main(int argc, char **argv) {
                        out_of_order_test.expected,
                        rtp_pkt.sequence_number);
 
-            // (todo): h264_parse_nal()
-
             // wip
-            h264_frame_t h264_frame;
             if (h264_get_frame(&rtp_pkt, &h264_frame) != SZ_H264_OK)
                 continue;
 
-            printf("current offset = %lu\n", sz_arena_pos(&h264_frame.arena));
+            if (rtp_pkt.marker) {
+                // end of the frame
+                // use the frame
+                // ........
+                // reset the arena
+                sz_arena_reset(&h264_frame.arena);
+            }
 
-            if (!b_is_initialized)
+            if (UNLIKELY(!b_is_initialized))
                 b_is_initialized = true;
 
             out_of_order_test.prev_seq_num = rtp_pkt.sequence_number;

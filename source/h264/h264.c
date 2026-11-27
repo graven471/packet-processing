@@ -1,8 +1,11 @@
 #include "h264.h"
 
 #include <rte_memcpy.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#include <sys/types.h>
 
 #include "rtp/parser.h"
 #include "sz/arena.h"
@@ -43,7 +46,7 @@ get_nal_type(uint8_t nal) {
 }
 
 [[clang::internal_linkage]] static void handle_nal_single(sz_span rtp_payload,
-                                                          h264_frame_t *out_frame) {
+                                                          h264_frame_t *frame) {
     /*
      0                   1                   2                   3
      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -60,8 +63,8 @@ get_nal_type(uint8_t nal) {
     RFC 6184 section 5.6
    */
 
-    uint8_t *ptr = sz_arena_alloc(&out_frame->arena, rtp_payload.len);
-    if (!ptr)
+    uint8_t *ptr = sz_arena_alloc(&frame->arena, rtp_payload.len);
+    if (!ptr) // todo: handle error
         return;
     rte_memcpy(ptr, rtp_payload.ptr, rtp_payload.len);
 }
@@ -116,17 +119,28 @@ get_nal_type(uint8_t nal) {
     if (fu_header == nullptr)
         return;
 
-    const uint8_t pt = *fu_header & 0x1F;
-    const uint8_t start = (*fu_header >> 7) & 0x01;
-    const uint8_t end = (*fu_header >> 6) & 0x01;
+    // const uint8_t pt = *fu_header & 0x1F;
+    // const uint8_t start = (*fu_header >> 7) & 0x01;
+    // const uint8_t end = (*fu_header >> 6) & 0x01;
 
     // start = 1, end = 0 -> start of fragmented packet
     // start = 0, end = 0 -> middle of fragmented packet
     // start = 0, end = 1 -> end of fragment packet
 }
 
-h264_result h264_init(struct h264_context *context) {
+h264_result h264_prepare_for_frame(size_t payload_capacity, h264_frame_t *frame) {
+    struct sz_arena_config cfg = {.capacity = payload_capacity,
+                                  .flags = ARENA_FLAG_HUGE_PAGES,
+                                  .pre_fault = true};
+    if (sz_arena_init(&cfg, &frame->arena) != 0)
+        return SZ_H264_MEMORY_ERROR;
     return SZ_H264_OK;
+}
+
+static inline void handle_sps(const struct rtp_packet *rtp_pkt, sz_span sps, h264_frame_t *frame) {
+    for (size_t i = 0; i < sps.len; ++i) {
+        printf("%u\n", *sz_span_at(sps, i));
+    }
 }
 
 h264_result h264_get_frame(const struct rtp_packet *_Nonnull packet, h264_frame_t *frame) {
@@ -136,49 +150,49 @@ h264_result h264_get_frame(const struct rtp_packet *_Nonnull packet, h264_frame_
 
     sz_span payload = packet->payload;
 
-    printf("seq=%u timestamp=%u marker=%u nal_type=%u\n",
-           packet->sequence_number,
-           packet->timestamp,
-           packet->marker,
-           packet->payload.ptr[0] & 0x1F);
-
     const uint8_t nal = *sz_span_first(payload);
     // this is forbidden bit must be 0
     if (UNLIKELY(((nal >> 7) & 0x01) != 0))
         return SZ_H264_INTERNAL_ERROR;
 
+    // reference important idicator
     const uint8_t nri = (nal >> 5) & 0x3;
     const nal_unit_type_t nal_type = get_nal_type(nal);
 
-    struct sz_arena_config arena_cfg = {.capacity = 2097152,
-                                        .pre_fault = true,
-                                        .flags = ARENA_FLAG_HUGE_PAGES};
-
-    // (fixme): recreating arena each time lol
-    if (sz_arena_init(&arena_cfg, &frame->arena) != 0)
-        return SZ_H264_INTERNAL_ERROR;
-
     switch (nal_type) {
     case NAL_TYPE_SINGLE:
+        if ((nal & 0x1f) == H264_NAL_SPS) {
+            handle_sps(packet, sz_span_subspan(payload, 1, payload.len - 1), frame);
+        }
+
+        if ((nal & 0x1f) == H264_NAL_PPS) {
+            // handle pps
+        }
+
         handle_nal_single(payload, frame);
-        if (packet->marker)
+        if (packet->marker) {
+            printf("END_SEQ=%u, TYPE=%u, M=%d TS=%u offset=%zu\n",
+                   packet->sequence_number,
+                   nal_type,
+                   packet->marker,
+                   packet->timestamp,
+                   sz_arena_pos(&frame->arena));
             break;
+        };
         break;
 
     // Aggregation Packets
     case NAL_TYPE_STAP_A:
-        printf("nal stap-a\n");
-        // handle_nal_stap_a(payload);
+        printf("nal stap-a not implemented\n");
         return SZ_H264_NOT_IMPLEMENTED;
 
     case NAL_TYPE_FU_A:
-        printf("nal fu-a\n");
+        printf("nal fu-a not implemented\n");
         return SZ_H264_NOT_IMPLEMENTED;
 
     case NAL_TYPE_UNKNOWN:
     case NAL_UNDEFINED:
         return SZ_H264_INTERNAL_ERROR;
     }
-
     return SZ_H264_OK;
 }
