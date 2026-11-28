@@ -42,6 +42,7 @@
 #include "sz/arena.h"
 #include "sz/macros.h"
 #include "sz/span.h"
+#include "sz/sz_types.h"
 #include "sz/sz_vector.h"
 #include "vk/vk_init.h"
 
@@ -118,7 +119,7 @@ int main(int argc, char **argv) {
 
     sz_vector_deinit(&vec);
 
-    constexpr uint16_t nb_pkts = 32;
+    constexpr u16 nb_pkts = 32;
     /*
      * struct rte_mubf is just a metadata actual data lives at rte_mbuf.buf_addr
      * buf_addr is that starting address there is actually headroom then packet then tailroom
@@ -156,8 +157,8 @@ int main(int argc, char **argv) {
      */
 
     while (1) {
-        uint16_t nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
-        for (uint16_t i = 0; i < nb; ++i) {
+        u16 nb = rte_eth_rx_burst(config.port_id, 0, rx_pkts, nb_pkts);
+        for (u16 i = 0; i < nb; ++i) {
             // this is the metadata
             const struct rte_mbuf *pkt = rx_pkts[i];
             // L2
@@ -184,7 +185,7 @@ int main(int argc, char **argv) {
             const uint8_t *rtp_data = rte_pktmbuf_mtod(pkt, const uint8_t *)
                                       + sizeof(struct rte_ether_hdr) + ip->ihl * 4
                                       + sizeof(struct rte_udp_hdr);
-            const uint16_t rtp_len = rte_be_to_cpu_16(udp->dgram_len) - sizeof(struct rte_udp_hdr);
+            const u16 rtp_len = rte_be_to_cpu_16(udp->dgram_len) - sizeof(struct rte_udp_hdr);
 
             sz_span rtp_span = sz_span_make(rtp_data, rtp_len);
 

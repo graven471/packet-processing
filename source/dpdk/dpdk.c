@@ -24,6 +24,8 @@
 #include <asm-generic/errno-base.h>
 #include <sys/types.h>
 
+#include "sz/sz_types.h"
+
 /*
  * core components of DPDK
  * 1. rte_timer : Timer facilities. Based on HPET interface that is provided by
@@ -197,7 +199,7 @@ int configure_port(struct dpdk_port_config *_Nonnull config) {
         return retval;
 
     // step 2 setup tx queue
-    for (uint16_t q = 0; q < config->nb_tx_queues; ++q) {
+    for (u16 q = 0; q < config->nb_tx_queues; ++q) {
         retval = rte_eth_tx_queue_setup(config->port_id,
                                         q,
                                         config->nb_tx_descriptors,
@@ -208,7 +210,7 @@ int configure_port(struct dpdk_port_config *_Nonnull config) {
     }
 
     // step 3 setup rx queue
-    for (uint16_t q = 0; q < config->nb_rx_queues; ++q) {
+    for (u16 q = 0; q < config->nb_rx_queues; ++q) {
         // (todo): investigate about Multi-segment RX (buffer split)
         retval = rte_eth_rx_queue_setup(config->port_id,
                                         q,

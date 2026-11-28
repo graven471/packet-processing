@@ -6,6 +6,8 @@ project(
   default_options: [
     'c_std=gnu23',
     'warning_level=2',
+    'b_sanitize=address,undefined',
+    'b_lundef=false',
     'buildtype=debugoptimized',
   ],
 )

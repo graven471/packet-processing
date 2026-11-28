@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include <asm-generic/errno-base.h>
@@ -12,19 +11,20 @@
 #include <sys/types.h>
 
 #include "sz/macros.h"
+#include "sz/sz_types.h"
 
 enum { ARENA_FLAG_NONE = 0, ARENA_FLAG_HUGE_PAGES = 1 << 1 };
 
 struct sz_arena_config {
-    uint8_t flags;
-    size_t capacity;
+    u8 flags;
+    usize capacity;
     bool pre_fault;
 };
 
 struct sz_arena {
-    uint8_t *storage;
-    size_t capacity;
-    size_t offset;
+    u8 *storage;
+    usize capacity;
+    usize offset;
 };
 
 static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_arena *out) {
@@ -48,7 +48,7 @@ static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_are
             return -errno;
     }
 
-    out->storage = (uint8_t *)storage;
+    out->storage = (u8 *)storage;
     out->offset = 0;
     out->capacity = cfg->capacity;
 
@@ -57,26 +57,26 @@ static inline int sz_arena_init(const struct sz_arena_config *cfg, struct sz_are
 
 // todo: sz_arena_set_alignment
 
-static inline uint8_t *sz_arena_alloc_aligned(struct sz_arena *self, size_t n, size_t alignment) {
+static inline u8 *sz_arena_alloc_aligned(struct sz_arena *self, usize n, usize alignment) {
     assert((alignment & (alignment - 1)) == 0);
     if (UNLIKELY(n > self->capacity))
         return nullptr;
     // assume storage = 0x1000 and offset = 8 i.e. we allocated first 8-bytes already
     // then address = 0x1000 + 8 = 0x1008
-    const uintptr_t address = (uintptr_t)(self->storage + self->offset);
+    const uptr address = (uptr)(self->storage + self->offset);
     // how may bytes to skip to find suitable starting address
-    const uintptr_t padding = (-address) & (alignment - 1);
-    const uintptr_t aligned_offset = self->offset + padding;
+    const uptr padding = (-address) & (alignment - 1);
+    const uptr aligned_offset = self->offset + padding;
     self->offset = aligned_offset + n;
-    return (uint8_t *)(self->storage + aligned_offset);
+    return (u8 *)(self->storage + aligned_offset);
 }
 
-static __always_inline uint8_t *sz_arena_alloc(struct sz_arena *self, size_t n) {
+static __always_inline u8 *sz_arena_alloc(struct sz_arena *self, usize n) {
     return sz_arena_alloc_aligned(self, n, alignof(max_align_t));
 }
 
-static __always_inline uint8_t *sz_arena_alloc_zeroed(struct sz_arena *self, size_t n) {
-    uint8_t *addr = sz_arena_alloc(self, n);
+static __always_inline u8 *sz_arena_alloc_zeroed(struct sz_arena *self, usize n) {
+    u8 *addr = sz_arena_alloc(self, n);
     if (addr == nullptr)
         return nullptr;
     memset(addr, 0, n);
@@ -87,7 +87,7 @@ static __always_inline void sz_arena_reset(struct sz_arena *self) {
     self->offset = 0;
 }
 
-static __always_inline size_t sz_arena_pos(struct sz_arena *self) {
+static __always_inline usize sz_arena_pos(struct sz_arena *self) {
     return self->offset;
 }
 

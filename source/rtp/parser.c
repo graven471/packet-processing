@@ -2,20 +2,20 @@
 
 #include <endian.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "sz/macros.h"
 #include "sz/span.h"
+#include "sz/sz_types.h"
 
-static inline uint32_t read_u32be(const void *p) {
-    uint32_t v;
+static inline u32 read_u32be(const void *p) {
+    u32 v;
     memcpy(&v, p, sizeof(v));
     return be32toh(v);
 }
 
-static inline uint16_t read_u16be(const void *p) {
-    uint16_t v;
+static inline u16 read_u16be(const void *p) {
+    u16 v;
     memcpy(&v, p, sizeof(v));
     return be16toh(v);
 }
@@ -52,31 +52,31 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     if (((*sz_span_first(rtp_hdr) >> 6) & 0x03) != 2)
         return RTP_PARSE_INVALID_VERSION;
 
-    uint8_t p = (*sz_span_first(rtp_hdr) >> 5) & 0x01;
-    uint8_t x = (*sz_span_first(rtp_hdr) >> 4) & 0x01;
+    u8 p = (*sz_span_first(rtp_hdr) >> 5) & 0x01;
+    u8 x = (*sz_span_first(rtp_hdr) >> 4) & 0x01;
     out->cc = *sz_span_first(rtp_hdr) & 0x0F;
 
     out->marker = (*sz_span_at(rtp_hdr, 1) >> 7) & 0x01;
     out->payload_type = *sz_span_at(rtp_hdr, 1) & 0x7F;
 
-    uint16_t raw;
-    memcpy(&raw, sz_span_at(rtp_hdr, 2), sizeof(uint16_t));
+    u16 raw;
+    memcpy(&raw, sz_span_at(rtp_hdr, 2), sizeof(u16));
     out->sequence_number = be16toh(raw);
 
     out->timestamp = read_u32be(sz_span_at(rtp_hdr, 4));
     out->ssrc = read_u32be(sz_span_at(rtp_hdr, 8));
 
     // each `cc` entries occupies 4-byte
-    size_t offset = RTP_HDR_LEN + (out->cc * 4);
+    usize offset = RTP_HDR_LEN + (out->cc * 4);
 
     if (UNLIKELY(x)) {
         if (rtp.len - offset < 4)
             return RTP_PARSE_TRUNCATED;
 
         // Extension length is in 32-bit words.
-        uint16_t ext_len = read_u16be(rtp.ptr + offset + 2);
+        u16 ext_len = read_u16be(rtp.ptr + offset + 2);
 
-        size_t ext_size = 4 + (size_t)ext_len * 4;
+        usize ext_size = 4 + (usize)ext_len * 4;
 
         if (ext_size > rtp.len - offset)
             return RTP_PARSE_TRUNCATED;
@@ -88,13 +88,13 @@ rtp_parse_result rtp_parse(sz_span rtp, struct rtp_packet *_Nonnull out) {
     if (sz_span_size(rtp) < offset)
         return RTP_PARSE_TRUNCATED;
 
-    size_t payload_len = sz_span_size(rtp) - offset;
+    usize payload_len = sz_span_size(rtp) - offset;
 
     if (p) {
         if (payload_len == 0)
             return RTP_PARSE_INVALID_PADDING;
 
-        const uint8_t padding_len = *sz_span_last(rtp);
+        const u8 padding_len = *sz_span_last(rtp);
         payload_len -= padding_len;
     }
 

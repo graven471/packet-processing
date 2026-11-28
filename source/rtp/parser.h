@@ -5,6 +5,7 @@
 
 #include "rtp/serial_number.h"
 #include "sz/span.h"
+#include "sz/sz_types.h"
 
 #define RTP_HDR_LEN 12
 
@@ -19,12 +20,12 @@ typedef enum {
 } rtp_parse_result;
 
 struct rtp_packet {
-    uint8_t cc;
+    u8 cc;
     bool marker;
-    uint8_t payload_type;
+    u8 payload_type;
     seq_num sequence_number;
-    uint32_t timestamp;
-    uint32_t ssrc;
+    u32 timestamp;
+    u32 ssrc;
     sz_span payload;
 };
 

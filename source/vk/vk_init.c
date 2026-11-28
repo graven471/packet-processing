@@ -11,13 +11,14 @@
 #include <vulkan/vulkan_core.h>
 
 #include "sz/log.h"
+#include "sz/sz_types.h"
 
 struct gpu_candidate {
     VkPhysicalDevice device;
     VkPhysicalDeviceProperties props;
-    uint32_t score;
-    uint32_t decode_queue_idx;
-    uint32_t graphics_queue_idx;
+    u32 score;
+    u32 decode_queue_idx;
+    u32 graphics_queue_idx;
     bool b_has_dedicated_decode_queue;
     bool b_has_swapchain;
     bool b_has_surface_support;
@@ -36,16 +37,16 @@ struct gpu_candidate {
      + sizeof(arr) / sizeof((arr)[0]))
 
 [[clang::internal_linkage]] [[gnu::nonnull]] static struct gpu_candidate
-select_preferred_gpu(VkPhysicalDevice *gpus, uint32_t gpu_count) {
+select_preferred_gpu(VkPhysicalDevice *gpus, u32 gpu_count) {
     struct gpu_candidate candiates[gpu_count];
     memset(candiates, 0, sizeof(candiates));
 
-    uint32_t best_score = 0;
-    uint32_t best_idx = UINT32_MAX;
-    constexpr uint32_t discrete_gpu_score = 200;
+    u32 best_score = 0;
+    u32 best_idx = UINT32_MAX;
+    constexpr u32 discrete_gpu_score = 200;
 
-    for (uint32_t idx = 0; idx < gpu_count; ++idx) {
-        uint32_t ext_count = 0;
+    for (u32 idx = 0; idx < gpu_count; ++idx) {
+        u32 ext_count = 0;
         VkPhysicalDevice gpu = gpus[idx];
         VkPhysicalDeviceProperties props = {0};
         vkGetPhysicalDeviceProperties(gpu, &props);
@@ -98,7 +99,7 @@ select_preferred_gpu(VkPhysicalDevice *gpus, uint32_t gpu_count) {
         if (result == VK_SUCCESS)
             candiates[idx].score += 300;
 
-        for (uint32_t i = 0; i < ext_count; ++i) {
+        for (u32 i = 0; i < ext_count; ++i) {
             if (strcmp(extension_props[i].extensionName, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) == 0
                 || strcmp(extension_props[i].extensionName,
                           VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME)
@@ -118,7 +119,7 @@ select_preferred_gpu(VkPhysicalDevice *gpus, uint32_t gpu_count) {
             }
         }
 
-        uint32_t queue_count = 0;
+        u32 queue_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(gpu, &queue_count, nullptr);
 
         if (queue_count == 0)
@@ -128,7 +129,7 @@ select_preferred_gpu(VkPhysicalDevice *gpus, uint32_t gpu_count) {
 
         vkGetPhysicalDeviceQueueFamilyProperties(gpu, &queue_count, queue_props);
 
-        for (uint32_t q = 0; q < queue_count; ++q) {
+        for (u32 q = 0; q < queue_count; ++q) {
             if ((queue_props[q].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR)
                 && !(queue_props[q].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
                 candiates[idx].score += 200;
@@ -201,7 +202,7 @@ setup_debug_messenger(VkInstance instance) {
 struct vk_context *vk_context_init() {
     VK_CHECK(volkInitialize());
 
-    uint32_t required_api_version = VK_VERSION_1_3;
+    u32 required_api_version = VK_VERSION_1_3;
 
     VkResult result = vkEnumerateInstanceVersion(&required_api_version);
 
@@ -228,7 +229,7 @@ struct vk_context *vk_context_init() {
     VkInstanceCreateInfo inst_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
-        .enabledExtensionCount = (uint32_t)ARRAY_SIZE(instance_extensions),
+        .enabledExtensionCount = (u32)ARRAY_SIZE(instance_extensions),
         .ppEnabledExtensionNames = instance_extensions,
         .ppEnabledLayerNames = nullptr,
         .enabledLayerCount = 0,
@@ -258,7 +259,7 @@ struct vk_context *vk_context_init() {
     self->dbg_messenger = VK_NULL_HANDLE;
 #endif
 
-    uint32_t physical_device_count = 0;
+    u32 physical_device_count = 0;
     VK_CHECK(vkEnumeratePhysicalDevices(instance, &physical_device_count, nullptr));
 
     if (physical_device_count == 0)
@@ -275,7 +276,7 @@ struct vk_context *vk_context_init() {
     const float queue_priorities = 1.0f;
 
     struct VkDeviceQueueCreateInfo queue_infos[2];
-    uint32_t queue_count = 0;
+    u32 queue_count = 0;
 
     queue_infos[queue_count++] =
         (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -310,7 +311,7 @@ struct vk_context *vk_context_init() {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_count,
         .pQueueCreateInfos = queue_infos,
-        .enabledExtensionCount = (uint32_t)ARRAY_SIZE(device_extensions),
+        .enabledExtensionCount = (u32)ARRAY_SIZE(device_extensions),
         .ppEnabledExtensionNames = device_extensions,
         .pEnabledFeatures = &device_features,
         .pNext = &features13,
@@ -378,7 +379,7 @@ struct vk_context *vk_context_init() {
     VK_CHECK(
         vkCreateVideoSessionKHR(self->device, &session_create_info, nullptr, &self->video_session));
 
-    uint32_t video_session_mem_req_count = 0;
+    u32 video_session_mem_req_count = 0;
     VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device,
                                                     self->video_session,
                                                     &video_session_mem_req_count,
@@ -387,7 +388,7 @@ struct vk_context *vk_context_init() {
     VkVideoSessionMemoryRequirementsKHR mem_requirements[video_session_mem_req_count];
     memset(mem_requirements, 0, sizeof(mem_requirements));
 
-    for (uint32_t i = 0; i < video_session_mem_req_count; ++i)
+    for (u32 i = 0; i < video_session_mem_req_count; ++i)
         mem_requirements[i].sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR;
 
     VK_CHECK(vkGetVideoSessionMemoryRequirementsKHR(self->device,
@@ -397,9 +398,9 @@ struct vk_context *vk_context_init() {
 
     //======================= bind memory for session =====================
     VkBindVideoSessionMemoryInfoKHR decode_session_bind_memory[MAX_BOUND_MEMORY];
-    for (uint32_t mem_idx = 0; mem_idx < video_session_mem_req_count; ++mem_idx) {
-        uint32_t memory_type_index = 0;
-        uint32_t mem_type_bits = mem_requirements[mem_idx].memoryRequirements.memoryTypeBits;
+    for (u32 mem_idx = 0; mem_idx < video_session_mem_req_count; ++mem_idx) {
+        u32 memory_type_index = 0;
+        u32 mem_type_bits = mem_requirements[mem_idx].memoryRequirements.memoryTypeBits;
 
         for (; !(mem_type_bits & 1); memory_type_index++)
             mem_type_bits >>= 1;
@@ -439,7 +440,7 @@ void vk_context_destroy(struct vk_context *context) {
         context->video_session = VK_NULL_HANDLE;
     }
 
-    for (uint32_t i = 0; i < context->memory_bound_size; ++i) {
+    for (u32 i = 0; i < context->memory_bound_size; ++i) {
         vkFreeMemory(context->device, context->memory_bound[i], nullptr);
         context->memory_bound[i] = VK_NULL_HANDLE;
     }
